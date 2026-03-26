@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import tiktoken
 
 
 class Head(nn.Module):
@@ -109,21 +110,47 @@ class GPT(nn.Module):
 
         def forward(self, idx, targets=None):
             B, T = idx.size()
-            assert T<= self.config.block_size, f"Cannot forward sequence of len {T} as it exceeds block_size = {self.config.block_size}"
-            
+            assert (
+                T <= self.config.block_size
+            ), f"Cannot forward sequence of len {T} as it exceeds block_size = {self.config.block_size}"
+
             pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
-            pos_emb = self.transformer.wpe(pos) 
+            pos_emb = self.transformer.wpe(pos)
             tok_emb = self.transformer.wte(idx)
-            x = tok_emb + pos_emb #broadcasting
+            x = tok_emb + pos_emb  # broadcasting
             for block in self.transformer.h:
-                x = block(x)      
+                x = block(x)
             x = self.transformer.ln_f(x)
             logits = self.lm_head(x)
             loss = None
             if targets is not None:
-                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+                loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)), targets.view(-1)
+                )
             return logits, loss
 
+class DataLoader:
+    def __init__(self, B, T):
+        self.B = B
+        self.T = T
+        
+        with open("input.txt", "r") as f:
+            text = f.read()
+        enc = tiktoken.get_encoding("gpt2")
+        tokens = enc.encode(text)
+        self.tokens = torch.tensor(tokens)
+        self.current_pos = 0
+
+    def get_batch(self):
+        B, T = self.B, self.T
+        buf = self.tokens[self.current_pos : self.current_pos + B * T + 1]
+        x = (buf[:-1]).view(B, T)
+        y = (buf[1:]).view(B, T)
+        self.current_pos += B * T
+        if self.current_pos + B * T + 1 >= len(self.tokens):
+            self.current_pos = 0
+        return x, y
+    
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda"
@@ -131,13 +158,13 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 print("using device: {device}")
 
-import tiktoken
-enc = tiktoken.get_encoding('gpt2')
-with open('input.txt', 'r') as f:
+
+enc = tiktoken.get_encoding("gpt2")
+with open("input.txt", "r") as f:
     text = f.read()
 tokens = enc.encode(text[:1000])
 B, T = 4, 32
-buf = torch.tensor(tokens[:B*T + 1]).to(device)
+buf = torch.tensor(tokens[: B * T + 1]).to(device)
 x = buf[:-1].view(B, T)
 y = buf[1:].view(B, T)
 
@@ -147,7 +174,7 @@ model.to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):
     optimizer.zero_grad()
-    logits, loss = model(x,y)
+    logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
     print(f"step {i}: loss: {loss.item()}")
