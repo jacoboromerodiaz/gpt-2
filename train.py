@@ -1,0 +1,153 @@
+from dataclasses import dataclass
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+
+
+class Head(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=False)
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.register_buffer(
+            "bias", torch.tril(torch.ones(config.block_size, config.block_size))
+        )
+
+        # self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        weights = (
+            q @ k.transpose(-2, -1) * k.shape[-1] ** -0.5
+        )  # (B, T, hs) @ (B, hs, T) -> (B, T, T)
+        weights = weights.masked_fill(
+            self.tril[:T, :T] == 0, float("-inf")
+        )  # (B, T, T)
+        weights = F.softmax(weights, dim=-1)  # (B, T, T)
+        # weights = self.dropout(weights)
+        out = weights @ v  # (B, T, T) @ (B, T, hs) -> (B, T, hs)
+        return out
+
+
+class CasualSelfAttention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.heads = nn.ModuleList(
+            [Head(config.head_size) for _ in range(config.num_heads)]
+        )
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        # self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        y = torch.cat([h(x) for h in self.heads], dim=-1)
+        y = self.c_proj(x)
+        # y = self.dropout(self.proj(y))
+        return y
+
+
+class FeedFoward(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.c_fc = (nn.Linear(config.n_embd, 4 * config.n_embd),)
+        self.gelu = (nn.GELU(approximate="tanh"),)
+        self.c_proj = (nn.Linear(4 * config.n_embd, config.n_embd),)
+        # self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        return x
+
+
+class Block(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(config)
+        self.attn = CasualSelfAttention(config)
+        self.ln_2 = nn.LayerNorm(config)
+        self.mlp = FeedFoward(config)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+        return x
+
+
+@dataclass
+class GPTConfig:  # 124M
+    block_size: int = 1024
+    vocab_size: int = 50257
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.2
+
+    @property
+    def head_size(self):
+        return self.n_embd // self.n_head
+
+
+class GPT(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+
+        self.transformer = nn.ModuleDict(
+            dict(
+                wte=nn.Embedding(config.vocab_size, config.n_embd),
+                wpe=nn.Embedding(config.block_size, config.n_embd),
+                h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+                ln_f=nn.LayerNorm(config.n_embd),
+            )
+        )
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        def forward(self, idx, targets=None):
+            B, T = idx.size()
+            assert T<= self.config.block_size, f"Cannot forward sequence of len {T} as it exceeds block_size = {self.config.block_size}"
+            
+            pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+            pos_emb = self.transformer.wpe(pos) 
+            tok_emb = self.transformer.wte(idx)
+            x = tok_emb + pos_emb #broadcasting
+            for block in self.transformer.h:
+                x = block(x)      
+            x = self.transformer.ln_f(x)
+            logits = self.lm_head(x)
+            loss = None
+            if targets is not None:
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            return logits, loss
+
+device = "cpu"
+if torch.cuda.is_available():
+    device = "cuda"
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    device = "mps"
+print("using device: {device}")
+
+import tiktoken
+enc = tiktoken.get_encoding('gpt2')
+with open('input.txt', 'r') as f:
+    text = f.read()
+tokens = enc.encode(text[:1000])
+B, T = 4, 32
+buf = torch.tensor(tokens[:B*T + 1]).to(device)
+x = buf[:-1].view(B, T)
+y = buf[1:].view(B, T)
+
+model = GPT(GPTConfig())
+model.to(device)
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+for i in range(50):
+    optimizer.zero_grad()
+    logits, loss = model(x,y)
+    loss.backward()
+    optimizer.step()
+    print(f"step {i}: loss: {loss.item()}")
