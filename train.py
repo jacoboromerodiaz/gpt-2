@@ -107,6 +107,17 @@ class GPT(nn.Module):
             )
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.transformer.wte.weight = self.lm_head.weight # weight tying
+        self.apply(self._init_weights)
+        
+        def _init_weights(self, module):
+            # follow source code
+            if isinstance(module, nn.Linear):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02) 
+                if module.bias is not None:
+                    torch.nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Embedding):
+                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
         def forward(self, idx, targets=None):
             B, T = idx.size()
@@ -158,6 +169,7 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 print("using device: {device}")
 
+train_loader = DataLoader(B=4, T=32)
 
 enc = tiktoken.get_encoding("gpt2")
 with open("input.txt", "r") as f:
@@ -173,6 +185,8 @@ model.to(device)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 for i in range(50):
+    x, y = train_loader.get_batch()
+    x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
     logits, loss = model(x, y)
     loss.backward()
