@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import tiktoken
+import math
+import inspect
 
 
 class Head(nn.Module):
@@ -22,10 +24,10 @@ class Head(nn.Module):
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
         weights = (
             q @ k.transpose(-2, -1) * k.shape[-1] ** -0.5
-        )  # (B, T, hs) @ (B, hs, T) -> (B, T, T)
+        ) 
         weights = weights.masked_fill(
             self.tril[:T, :T] == 0, float("-inf")
-        )  # (B, T, T)
+        ) 
         weights = F.softmax(weights, dim=-1)  # (B, T, T)
         # weights = self.dropout(weights)
         out = weights @ v  # (B, T, T) @ (B, T, hs) -> (B, T, hs)
@@ -169,6 +171,45 @@ class DataLoader:
             self.current_pos = 0
         return x, y
 
+max_lr = 6e-4
+min_lr = max_lr * 0.1
+warmup_steps = 10
+max_steps = 50
+
+def get_lr(step):
+    if step < warmup_steps:
+        return max_lr * (step+1) / warmup_steps
+    if step > max_steps:
+        return min_lr
+    decay = (step - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay <= 1
+    cos_coeff = 0.5 * (1.0 + math.cos(math.pi * decay))
+    return max_lr + cos_coeff * (max_lr - min_lr)
+
+def configure_optimizer(self, weight_decay, lr, device):
+    param_dict = {pn: p for pn, p in self.named_parameters().items() if p.requires_grad}
+    decay_params = [p for n,p in param_dict.items() if p.ndim >= 2]
+    no_decay_params = [p for n,p in param_dict.items() if p.ndim < 2]
+
+    optim_groups = [
+        {
+            "params": decay_params,
+            "weight_decay": weight_decay
+        },
+        {
+            "params": no_decay_params,
+            "weight_decay": 0.0
+        }
+    ]
+    num_decay_params = sum(p.numel() for p in decay_params)
+    num_no_decay_params = sum(p.numel() for p in no_decay_params)
+    print(f"num decay params: {num_decay_params}, num no decay params: {num_no_decay_params}")
+    
+    fused_avail = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+    use_fused = fused_avail and device == 'cuda' 
+    print(f"using fused AdamW: {use_fused}")
+    optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+    return optimizer
 
 device = "cpu"
 if torch.cuda.is_available():
@@ -176,6 +217,11 @@ if torch.cuda.is_available():
 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 print("using device: {device}")
+
+sim_batch_size = 524288
+B, T = 16, 1024
+assert sim_batch_size % (B * T) == 0, "sim_batch_size must be divisible by B * T"
+grad_accum_steps = sim_batch_size // (B * T)
 
 train_loader = DataLoader(B=4, T=32)
 
@@ -192,8 +238,9 @@ model = GPT(GPTConfig())
 model.to(device)
 model = torch.compile(model)
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
-for i in range(50):
+optimizer = model.configure_optimizer(weight_decay=0.1, lr=6e-4, device=device)
+for step in range(max_steps):
+    for micro_step 
     x, y = train_loader.get_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
@@ -201,5 +248,8 @@ for i in range(50):
         logits, loss = model(x, y)
     loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
     optimizer.step()
-    print(f"step {i}: loss: {loss.item()}")
+    print(f"step {step}: loss: {loss.item()}")
