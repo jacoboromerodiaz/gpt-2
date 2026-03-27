@@ -39,7 +39,7 @@ class CasualSelfAttention(nn.Module):
             [Head(config.head_size) for _ in range(config.num_heads)]
         )
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
-        self.c_proj.GPT_SCALE_INIT = 1 #flag
+        self.c_proj.GPT_SCALE_INIT = 1  # flag
         # self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -55,7 +55,7 @@ class FeedFoward(nn.Module):
         self.c_fc = (nn.Linear(config.n_embd, 4 * config.n_embd),)
         self.gelu = (nn.GELU(approximate="tanh"),)
         self.c_proj = (nn.Linear(4 * config.n_embd, config.n_embd),)
-        self.c_proj.GPT_SCALE_INIT = 1 #flag
+        self.c_proj.GPT_SCALE_INIT = 1  # flag
         # self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -109,14 +109,14 @@ class GPT(nn.Module):
             )
         )
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.transformer.wte.weight = self.lm_head.weight # weight tying
+        self.transformer.wte.weight = self.lm_head.weight  # weight tying
         self.apply(self._init_weights)
-        
+
         def _init_weights(self, module):
             # follow source code
             std = 0.02
             if hasattr(module, "GPT_SCALE_INIT"):
-                std *= (2*self.config.n_layer) ** -0.5
+                std *= (2 * self.config.n_layer) ** -0.5
             if isinstance(module, nn.Linear):
                 torch.nn.init.normal_(module.weight, mean=0.0, std=std)
                 if module.bias is not None:
@@ -126,9 +126,10 @@ class GPT(nn.Module):
 
         def forward(self, idx, targets=None):
             B, T = idx.size()
-            assert (
-                T <= self.config.block_size
-            ), f"Cannot forward sequence of len {T} as it exceeds block_size = {self.config.block_size}"
+            assert T <= self.config.block_size, (
+                f"Cannot forward sequence of len {T} as it exceeds "
+                f"block_size = {self.config.block_size}"
+            )
 
             pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
             pos_emb = self.transformer.wpe(pos)
@@ -145,11 +146,12 @@ class GPT(nn.Module):
                 )
             return logits, loss
 
+
 class DataLoader:
     def __init__(self, B, T):
         self.B = B
         self.T = T
-        
+
         with open("input.txt", "r") as f:
             text = f.read()
         enc = tiktoken.get_encoding("gpt2")
@@ -159,14 +161,15 @@ class DataLoader:
 
     def get_batch(self):
         B, T = self.B, self.T
-        buf = self.tokens[self.current_pos : self.current_pos + B * T + 1]
+        buf = self.tokens[self.current_pos:self.current_pos+B*T+1]
         x = (buf[:-1]).view(B, T)
         y = (buf[1:]).view(B, T)
         self.current_pos += B * T
         if self.current_pos + B * T + 1 >= len(self.tokens):
             self.current_pos = 0
         return x, y
-    
+
+
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda"
@@ -189,10 +192,7 @@ model = GPT(GPTConfig())
 model.to(device)
 model = torch.compile(model)
 
-optimizer = torch.optim.AdamW(model.parameters(), 
-                              lr=3e-4,
-                              betas=(0.9, 0.95),
-                              eps=1e-8)
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95), eps=1e-8)
 for i in range(50):
     x, y = train_loader.get_batch()
     x, y = x.to(device), y.to(device)
@@ -200,5 +200,6 @@ for i in range(50):
     with torch.autocast(device_type=device, dtype=torch.bfloat16):
         logits, loss = model(x, y)
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
     print(f"step {i}: loss: {loss.item()}")
