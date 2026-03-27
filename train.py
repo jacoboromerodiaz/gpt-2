@@ -39,6 +39,7 @@ class CasualSelfAttention(nn.Module):
             [Head(config.head_size) for _ in range(config.num_heads)]
         )
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.GPT_SCALE_INIT = 1 #flag
         # self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -54,6 +55,7 @@ class FeedFoward(nn.Module):
         self.c_fc = (nn.Linear(config.n_embd, 4 * config.n_embd),)
         self.gelu = (nn.GELU(approximate="tanh"),)
         self.c_proj = (nn.Linear(4 * config.n_embd, config.n_embd),)
+        self.c_proj.GPT_SCALE_INIT = 1 #flag
         # self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -112,12 +114,15 @@ class GPT(nn.Module):
         
         def _init_weights(self, module):
             # follow source code
+            std = 0.02
+            if hasattr(module, "GPT_SCALE_INIT"):
+                std *= (2*self.config.n_layer) ** -0.5
             if isinstance(module, nn.Linear):
-                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02) 
+                torch.nn.init.normal_(module.weight, mean=0.0, std=std)
                 if module.bias is not None:
                     torch.nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Embedding):
-                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                torch.nn.init.normal_(module.weight, mean=0.0, std=std)
 
         def forward(self, idx, targets=None):
             B, T = idx.size()
@@ -182,13 +187,18 @@ y = buf[1:].view(B, T)
 
 model = GPT(GPTConfig())
 model.to(device)
+model = torch.compile(model)
 
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+optimizer = torch.optim.AdamW(model.parameters(), 
+                              lr=3e-4,
+                              betas=(0.9, 0.95),
+                              eps=1e-8)
 for i in range(50):
     x, y = train_loader.get_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    logits, loss = model(x, y)
+    with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        logits, loss = model(x, y)
     loss.backward()
     optimizer.step()
     print(f"step {i}: loss: {loss.item()}")
