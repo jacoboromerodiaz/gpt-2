@@ -218,6 +218,8 @@ elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 print("using device: {device}")
 
+
+
 sim_batch_size = 524288
 B, T = 16, 1024
 assert sim_batch_size % (B * T) == 0, "sim_batch_size must be divisible by B * T"
@@ -239,14 +241,17 @@ model.to(device)
 model = torch.compile(model)
 
 optimizer = model.configure_optimizer(weight_decay=0.1, lr=6e-4, device=device)
+loss_accum = 0.0
 for step in range(max_steps):
-    for micro_step 
-    x, y = train_loader.get_batch()
-    x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-        logits, loss = model(x, y)
-    loss.backward()
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.get_batch()
+        x, y = x.to(device), y.to(device)
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
+        loss /= grad_accum_steps
+        loss_accum *= loss.detach()
+        loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
