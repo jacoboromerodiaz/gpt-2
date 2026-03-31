@@ -2,10 +2,11 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from torch.distributed import init_process_group, destroy_process_group
+from torch.distributed import init_process_group
 import tiktoken
 import math
 import inspect
+import os
 
 
 class Head(nn.Module):
@@ -23,12 +24,8 @@ class Head(nn.Module):
     def forward(self, x):
         B, T, C = x.shape
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        weights = (
-            q @ k.transpose(-2, -1) * k.shape[-1] ** -0.5
-        ) 
-        weights = weights.masked_fill(
-            self.tril[:T, :T] == 0, float("-inf")
-        ) 
+        weights = q @ k.transpose(-2, -1) * k.shape[-1] ** -0.5
+        weights = weights.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
         weights = F.softmax(weights, dim=-1)  # (B, T, T)
         # weights = self.dropout(weights)
         out = weights @ v  # (B, T, T) @ (B, T, hs) -> (B, T, hs)
@@ -164,7 +161,7 @@ class DataLoader:
 
     def get_batch(self):
         B, T = self.B, self.T
-        buf = self.tokens[self.current_pos:self.current_pos+B*T+1]
+        buf = self.tokens[self.current_pos : self.current_pos + B * T + 1]
         x = (buf[:-1]).view(B, T)
         y = (buf[1:]).view(B, T)
         self.current_pos += B * T
@@ -172,14 +169,16 @@ class DataLoader:
             self.current_pos = 0
         return x, y
 
+
 max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 10
 max_steps = 50
 
+
 def get_lr(step):
     if step < warmup_steps:
-        return max_lr * (step+1) / warmup_steps
+        return max_lr * (step + 1) / warmup_steps
     if step > max_steps:
         return min_lr
     decay = (step - warmup_steps) / (max_steps - warmup_steps)
@@ -187,39 +186,40 @@ def get_lr(step):
     cos_coeff = 0.5 * (1.0 + math.cos(math.pi * decay))
     return max_lr + cos_coeff * (max_lr - min_lr)
 
+
 def configure_optimizer(self, weight_decay, lr, device):
     param_dict = {pn: p for pn, p in self.named_parameters().items() if p.requires_grad}
-    decay_params = [p for n,p in param_dict.items() if p.ndim >= 2]
-    no_decay_params = [p for n,p in param_dict.items() if p.ndim < 2]
+    decay_params = [p for n, p in param_dict.items() if p.ndim >= 2]
+    no_decay_params = [p for n, p in param_dict.items() if p.ndim < 2]
 
     optim_groups = [
-        {
-            "params": decay_params,
-            "weight_decay": weight_decay
-        },
-        {
-            "params": no_decay_params,
-            "weight_decay": 0.0
-        }
+        {"params": decay_params, "weight_decay": weight_decay},
+        {"params": no_decay_params, "weight_decay": 0.0},
     ]
     num_decay_params = sum(p.numel() for p in decay_params)
     num_no_decay_params = sum(p.numel() for p in no_decay_params)
-    print(f"num decay params: {num_decay_params}, num no decay params: {num_no_decay_params}")
-    
-    fused_avail = 'fused' in inspect.signature(torch.optim.AdamW).parameters
-    use_fused = fused_avail and device == 'cuda' 
+    print(
+        f"num decay params: {num_decay_params}, "
+        f"num no decay params: {num_no_decay_params}"
+    )
+
+    fused_avail = "fused" in inspect.signature(torch.optim.AdamW).parameters
+    use_fused = fused_avail and device == "cuda"
     print(f"using fused AdamW: {use_fused}")
-    optimizer = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8, fused=use_fused)
+    optimizer = torch.optim.AdamW(
+        optim_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8, fused=use_fused
+    )
     return optimizer
 
-ddp = int(os.environ.get('RANK', -1)) != -1
+
+ddp = int(os.environ.get("RANK", -1)) != -1
 if ddp:
     assert torch.cuda.is_available(), "No cuda available for DDP"
-    init_process_group(backend='nccl')
-    ddp_rank = int(os.environ['RANK'])
-    ddp_local_rank = int(os.environ['LOCAL_RANK'])
-    ddp_world_size = int(os.environ['WORLD_SIZE'])
-    device = f'cuda:{ddp_local_rank}'
+    init_process_group(backend="nccl")
+    ddp_rank = int(os.environ["RANK"])
+    ddp_local_rank = int(os.environ["LOCAL_RANK"])
+    ddp_world_size = int(os.environ["WORLD_SIZE"])
+    device = f"cuda:{ddp_local_rank}"
     torch.cuda.set_device(device=device)
     master_process = ddp_rank == 0
 else:
@@ -238,8 +238,10 @@ torch.manual_seed(333)
 
 sim_batch_size = 524288
 B, T = 16, 1024
-assert sim_batch_size % (B * T) == 0, "sim_batch_size must be divisible by B * T"
-grad_accum_steps = sim_batch_size // (B * T)
+assert (
+    sim_batch_size % (B * T * ddp_world_size) == 0
+), "sim_batch_size must be divisible by B * T * ddp_world_size"
+grad_accum_steps = sim_batch_size // (B * T * ddp_world_size)
 
 train_loader = DataLoader(B=4, T=32)
 
@@ -271,6 +273,6 @@ for step in range(max_steps):
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
+        param_group["lr"] = lr
     optimizer.step()
     print(f"step {step}: loss: {loss.item()}")
