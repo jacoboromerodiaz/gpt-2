@@ -148,25 +148,27 @@ class GPT(nn.Module):
 
 
 class DataLoader:
-    def __init__(self, B, T):
+    def __init__(self, B, T, process_rank, num_processes):
         self.B = B
         self.T = T
+        self.process_rank = process_rank
+        self.num_processes = num_processes
 
         with open("input.txt", "r") as f:
             text = f.read()
-        enc = tiktoken.get_encoding("gpt2")
+        enc = tiktoken.get_encoding("gpt2")  # TODO import tokenizer
         tokens = enc.encode(text)
         self.tokens = torch.tensor(tokens)
-        self.current_pos = 0
+        self.current_pos = self.B * self.T * self.process_rank
 
     def get_batch(self):
         B, T = self.B, self.T
         buf = self.tokens[self.current_pos : self.current_pos + B * T + 1]
         x = (buf[:-1]).view(B, T)
         y = (buf[1:]).view(B, T)
-        self.current_pos += B * T
-        if self.current_pos + B * T + 1 >= len(self.tokens):
-            self.current_pos = 0
+        self.current_pos += B * T * self.num_processes
+        if self.current_pos + B * T * self.num_processes + 1 >= len(self.tokens):
+            self.current_pos = self.B * self.T * self.process_rank
         return x, y
 
 
@@ -243,7 +245,9 @@ assert (
 ), "sim_batch_size must be divisible by B * T * ddp_world_size"
 grad_accum_steps = sim_batch_size // (B * T * ddp_world_size)
 
-train_loader = DataLoader(B=4, T=32)
+train_loader = DataLoader(
+    B=4, T=32, process_rank=ddp_rank, num_processes=ddp_world_size
+)
 
 enc = tiktoken.get_encoding("gpt2")
 with open("input.txt", "r") as f:
