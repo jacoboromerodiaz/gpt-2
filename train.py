@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 
-import tiktoken
 import math
 import inspect
 import os
+
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -169,18 +170,32 @@ class GPT(nn.Module):
         return logits, loss
 
 
+def load_tokens(file):
+    npt = np.load(file)
+    ppt = torch.tensor(npt, dtype=torch.long)
+    return ppt
+
+
 class DataLoader:
-    def __init__(self, B, T, process_rank, num_processes):
+    def __init__(self, B, T, process_rank, num_processes, split):
         self.B = B
         self.T = T
         self.process_rank = process_rank
         self.num_processes = num_processes
+        assert split in {"train", "val"}, "Invalid split"
 
-        with open("input.txt", "r") as f:
-            text = f.read()
-        enc = tiktoken.get_encoding("gpt2")  # TODO import tokenizer
-        tokens = enc.encode(text)
-        self.tokens = torch.tensor(tokens)
+        data_root = "edu_fineweb10B"
+        shards = os.listdir(data_root)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        shards = [os.path.join(data_root, s) for s in shards]
+        self.shards = shards
+        assert len(shards) > 0, f"no shards found for split {split}"
+        if master_process:
+            print(f"found {len(shards)} shards for split {split}")
+
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_pos = self.B * self.T * self.process_rank
 
     def get_batch(self):
@@ -190,14 +205,17 @@ class DataLoader:
         y = (buf[1:]).view(B, T)
         self.current_pos += B * T * self.num_processes
         if self.current_pos + B * T * self.num_processes + 1 >= len(self.tokens):
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_pos = self.B * self.T * self.process_rank
         return x, y
 
 
+# hardcoded from gpt-3 paper
 max_lr = 6e-4
 min_lr = max_lr * 0.1
-warmup_steps = 10
-max_steps = 50
+warmup_steps = 715
+max_steps = 19073
 
 
 def get_lr(step):
@@ -243,17 +261,11 @@ assert (
 grad_accum_steps = sim_batch_size // (B * T * ddp_world_size)
 
 train_loader = DataLoader(
-    B=4, T=32, process_rank=ddp_rank, num_processes=ddp_world_size
+    B=4, T=32, process_rank=ddp_rank, num_processes=ddp_world_size, split="train"
 )
-
-enc = tiktoken.get_encoding("gpt2")
-with open("input.txt", "r") as f:
-    text = f.read()
-tokens = enc.encode(text[:1000])
-B, T = 4, 32
-buf = torch.tensor(tokens[: B * T + 1]).to(device)
-x = buf[:-1].view(B, T)
-y = buf[1:].view(B, T)
+val_loader = DataLoader(
+    B=4, T=32, process_rank=ddp_rank, num_processes=ddp_world_size, split="val"
+)
 
 model = GPT(GPTConfig())
 model.to(device)
