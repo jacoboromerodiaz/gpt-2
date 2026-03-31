@@ -8,9 +8,8 @@ import os
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import torch.distributed as dist 
+import torch.distributed as dist
 from torch.distributed import init_process_group
-
 
 
 class Head(nn.Module):
@@ -29,7 +28,7 @@ class Head(nn.Module):
         B, T, C = x.shape
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
         weights = q @ k.transpose(-2, -1) * k.shape[-1] ** -0.5
-        weights = weights.masked_fill(self.tril[:T, :T] == 0, float("-inf"))
+        weights = weights.masked_fill(self.bias[:T, :T] == 0, float("-inf"))
         weights = F.softmax(weights, dim=-1)  # (B, T, T)
         # weights = self.dropout(weights)
         out = weights @ v  # (B, T, T) @ (B, T, hs) -> (B, T, hs)
@@ -39,9 +38,7 @@ class Head(nn.Module):
 class CasualSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.heads = nn.ModuleList(
-            [Head(config.head_size) for _ in range(config.num_heads)]
-        )
+        self.heads = nn.ModuleList([Head(config) for _ in range(config.n_head)])
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.c_proj.GPT_SCALE_INIT = 1  # flag
         # self.dropout = nn.Dropout(config.dropout)
@@ -53,12 +50,12 @@ class CasualSelfAttention(nn.Module):
         return y
 
 
-class FeedFoward(nn.Module):
+class FeedForward(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = (nn.Linear(config.n_embd, 4 * config.n_embd),)
-        self.gelu = (nn.GELU(approximate="tanh"),)
-        self.c_proj = (nn.Linear(4 * config.n_embd, config.n_embd),)
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
+        self.gelu = nn.GELU(approximate="tanh")
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
         self.c_proj.GPT_SCALE_INIT = 1  # flag
         # self.dropout = nn.Dropout(config.dropout)
 
@@ -73,14 +70,14 @@ class Block(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(config)
+        self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CasualSelfAttention(config)
-        self.ln_2 = nn.LayerNorm(config)
-        self.mlp = FeedFoward(config)
+        self.ln_2 = nn.LayerNorm(config.n_embd)
+        self.mlp = FeedForward(config)
 
     def forward(self, x):
-        x = x + self.attn(self.ln1(x))
-        x = x + self.ffwd(self.ln2(x))
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
         return x
 
 
@@ -116,39 +113,61 @@ class GPT(nn.Module):
         self.transformer.wte.weight = self.lm_head.weight  # weight tying
         self.apply(self._init_weights)
 
-        def _init_weights(self, module):
-            # follow source code
-            std = 0.02
-            if hasattr(module, "GPT_SCALE_INIT"):
-                std *= (2 * self.config.n_layer) ** -0.5
-            if isinstance(module, nn.Linear):
-                torch.nn.init.normal_(module.weight, mean=0.0, std=std)
-                if module.bias is not None:
-                    torch.nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.Embedding):
-                torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+    def _init_weights(self, module):
+        # follow source code
+        std = 0.02
+        if hasattr(module, "GPT_SCALE_INIT"):
+            std *= (2 * self.config.n_layer) ** -0.5
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=std)
 
-        def forward(self, idx, targets=None):
-            B, T = idx.size()
-            assert T <= self.config.block_size, (
-                f"Cannot forward sequence of len {T} as it exceeds "
-                f"block_size = {self.config.block_size}"
-            )
+    def configure_optimizer(self, weight_decay, lr, device):
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+        decay_params = [p for n, p in param_dict.items() if p.ndim >= 2]
+        no_decay_params = [p for n, p in param_dict.items() if p.ndim < 2]
 
-            pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
-            pos_emb = self.transformer.wpe(pos)
-            tok_emb = self.transformer.wte(idx)
-            x = tok_emb + pos_emb  # broadcasting
-            for block in self.transformer.h:
-                x = block(x)
-            x = self.transformer.ln_f(x)
-            logits = self.lm_head(x)
-            loss = None
-            if targets is not None:
-                loss = F.cross_entropy(
-                    logits.view(-1, logits.size(-1)), targets.view(-1)
-                )
-            return logits, loss
+        optim_groups = [
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_no_decay_params = sum(p.numel() for p in no_decay_params)
+        print(
+            f"num decay params: {num_decay_params}, "
+            f"num no decay params: {num_no_decay_params}"
+        )
+
+        fused_avail = "fused" in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_avail and device == "cuda"
+        print(f"using fused AdamW: {use_fused}")
+        optimizer = torch.optim.AdamW(
+            optim_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8, fused=use_fused
+        )
+        return optimizer
+
+    def forward(self, idx, targets=None):
+        B, T = idx.size()
+        assert T <= self.config.block_size, (
+            f"Cannot forward sequence of len {T} as it exceeds "
+            f"block_size = {self.config.block_size}"
+        )
+
+        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+        pos_emb = self.transformer.wpe(pos)
+        tok_emb = self.transformer.wte(idx)
+        x = tok_emb + pos_emb  # broadcasting
+        for block in self.transformer.h:
+            x = block(x)
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x)
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        return logits, loss
 
 
 class DataLoader:
@@ -193,31 +212,6 @@ def get_lr(step):
     return max_lr + cos_coeff * (max_lr - min_lr)
 
 
-def configure_optimizer(self, weight_decay, lr, device):
-    param_dict = {pn: p for pn, p in self.named_parameters().items() if p.requires_grad}
-    decay_params = [p for n, p in param_dict.items() if p.ndim >= 2]
-    no_decay_params = [p for n, p in param_dict.items() if p.ndim < 2]
-
-    optim_groups = [
-        {"params": decay_params, "weight_decay": weight_decay},
-        {"params": no_decay_params, "weight_decay": 0.0},
-    ]
-    num_decay_params = sum(p.numel() for p in decay_params)
-    num_no_decay_params = sum(p.numel() for p in no_decay_params)
-    print(
-        f"num decay params: {num_decay_params}, "
-        f"num no decay params: {num_no_decay_params}"
-    )
-
-    fused_avail = "fused" in inspect.signature(torch.optim.AdamW).parameters
-    use_fused = fused_avail and device == "cuda"
-    print(f"using fused AdamW: {use_fused}")
-    optimizer = torch.optim.AdamW(
-        optim_groups, lr=lr, betas=(0.9, 0.95), eps=1e-8, fused=use_fused
-    )
-    return optimizer
-
-
 ddp = int(os.environ.get("RANK", -1)) != -1
 if ddp:
     assert torch.cuda.is_available(), "No cuda available for DDP"
@@ -238,7 +232,7 @@ else:
         device = "cuda"
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         device = "mps"
-    print("using device: {device}")
+    print(f"using device: {device}")
 
 torch.manual_seed(333)
 
@@ -267,7 +261,9 @@ model.to(device)
 model = torch.compile(model)
 
 if ddp:
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[ddp_local_rank])
+    model = torch.nn.parallel.DistributedDataParallel(
+        model, device_ids=[ddp_local_rank]
+    )
 
 optimizer = model.configure_optimizer(weight_decay=0.1, lr=6e-4, device=device)
 loss_accum = 0.0
@@ -283,7 +279,7 @@ for step in range(max_steps):
         if ddp:
             model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
         loss.backward()
-    if ddp: 
+    if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     lr = get_lr(step)
@@ -291,4 +287,8 @@ for step in range(max_steps):
         param_group["lr"] = lr
     optimizer.step()
     if master_process:
-        print(f"STEP {step} -> loss: {loss_accum.item()}", f"lr: {lr:.6e}", f"grad norm: {norm:.6e}")
+        print(
+            f"STEP {step} -> loss: {loss_accum.item()}",
+            f"lr: {lr:.6e}",
+            f"grad norm: {norm:.6e}",
+        )
