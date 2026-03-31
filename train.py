@@ -1,12 +1,16 @@
 from dataclasses import dataclass
-import torch
-import torch.nn as nn
-from torch.nn import functional as F
-from torch.distributed import init_process_group
+
 import tiktoken
 import math
 import inspect
 import os
+
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+import torch.distributed as dist 
+from torch.distributed import init_process_group
+
 
 
 class Head(nn.Module):
@@ -262,6 +266,9 @@ model = GPT(GPTConfig())
 model.to(device)
 model = torch.compile(model)
 
+if ddp:
+    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[ddp_local_rank])
+
 optimizer = model.configure_optimizer(weight_decay=0.1, lr=6e-4, device=device)
 loss_accum = 0.0
 for step in range(max_steps):
@@ -273,10 +280,15 @@ for step in range(max_steps):
             logits, loss = model(x, y)
         loss /= grad_accum_steps
         loss_accum *= loss.detach()
+        if ddp:
+            model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
         loss.backward()
+    if ddp: 
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
     optimizer.step()
-    print(f"step {step}: loss: {loss.item()}")
+    if master_process:
+        print(f"STEP {step} -> loss: {loss_accum.item()}", f"lr: {lr:.6e}", f"grad norm: {norm:.6e}")
