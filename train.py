@@ -15,23 +15,22 @@ from torch.distributed import init_process_group
 class Head(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=False)
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.head_size, bias=False)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
+        self.head_size = config.head_size
         self.register_buffer(
             "bias", torch.tril(torch.ones(config.block_size, config.block_size))
         )
 
-        # self.dropout = nn.Dropout(config.dropout)
-
     def forward(self, x):
         B, T, C = x.shape
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        weights = q @ k.transpose(-2, -1) * k.shape[-1] ** -0.5
+        qkv = self.c_attn(x)  # [B, T, 192] (3 * 64)
+        q, k, v = qkv.split(self.head_size, dim=2)  # Each: [B, T, 64]
+        weights = q @ k.transpose(-2, -1) * self.head_size**-0.5  # Scale by head_size
         weights = weights.masked_fill(self.bias[:T, :T] == 0, float("-inf"))
-        weights = F.softmax(weights, dim=-1)  # (B, T, T)
-        # weights = self.dropout(weights)
-        out = weights @ v  # (B, T, T) @ (B, T, hs) -> (B, T, hs)
+        weights = F.softmax(weights, dim=-1)
+        out = weights @ v  # [B, T, 64]
         return out
 
 
@@ -45,7 +44,7 @@ class CasualSelfAttention(nn.Module):
 
     def forward(self, x):
         y = torch.cat([h(x) for h in self.heads], dim=-1)
-        y = self.c_proj(x)
+        y = self.c_proj(y)
         # y = self.dropout(self.proj(y))
         return y
 
@@ -266,8 +265,8 @@ if ddp:
     )
 
 optimizer = model.configure_optimizer(weight_decay=0.1, lr=6e-4, device=device)
-loss_accum = 0.0
 for step in range(max_steps):
+    loss_accum = 0.0
     optimizer.zero_grad()
     for micro_step in range(grad_accum_steps):
         x, y = train_loader.get_batch()
@@ -275,7 +274,7 @@ for step in range(max_steps):
         with torch.autocast(device_type=device, dtype=torch.bfloat16):
             logits, loss = model(x, y)
         loss /= grad_accum_steps
-        loss_accum *= loss.detach()
+        loss_accum += loss.detach()
         if ddp:
             model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
         loss.backward()
@@ -288,7 +287,7 @@ for step in range(max_steps):
     optimizer.step()
     if master_process:
         print(
-            f"STEP {step} -> loss: {loss_accum.item()}",
-            f"lr: {lr:.6e}",
-            f"grad norm: {norm:.6e}",
+            f"STEP {step} -> loss: {loss_accum.item():.4f},\t",
+            f"lr: {lr:.2e},\t",
+            f"grad norm: {norm:.2e}",
         )
