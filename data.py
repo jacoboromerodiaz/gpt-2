@@ -27,6 +27,9 @@ class DataLoader:
         if master_process:
             print(f"found {len(shards)} shards for split {split}")
 
+        self.current_shard = 0
+        self.tokens = None
+        self.current_pos = 0
         self.reset()
 
     def reset(self):
