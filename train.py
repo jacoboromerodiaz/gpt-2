@@ -78,7 +78,7 @@ optimizer = model.configure_optimizer(weight_decay=0.1, lr=6e-4, device=device)
 
 log_dir = "log"
 os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, 'train.log')
+log_file = os.path.join(log_dir, "train.log")
 
 
 for step in range(max_steps):
@@ -118,6 +118,7 @@ for step in range(max_steps):
                 torch.save(checkpoint, checkpoint_path)
 
     # forward pass, backward pass
+    model.train()
     loss_accum = 0.0
     optimizer.zero_grad()
     for micro_step in range(grad_accum_steps):
@@ -137,12 +138,20 @@ for step in range(max_steps):
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
     optimizer.step()
+    t1 = time.time()
+    dt = t1 - t0  # time difference in seconds
+    tokens_processed = (
+        train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
+    )
+    tokens_per_sec = tokens_processed / dt
     if master_process:
         print(
-            f"STEP {step} -> loss: {loss_accum.item():.4f},\t",
-            f"lr: {lr:.2e},\t",
-            f"grad norm: {norm:.2e}",
+            f"step {step:5d} | loss: {loss_accum.item():.6f} |"
+            f", lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms",
+            f"| tok/sec: {tokens_per_sec:.2f}"
         )
+        with open(log_file, "a") as f:
+            f.write(f"{step} train {loss_accum.item():.6f}\n")
 
 if ddp:
     destroy_process_group()
