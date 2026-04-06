@@ -36,8 +36,8 @@ if ddp:
     ddp_rank = int(os.environ["RANK"])
     ddp_local_rank = int(os.environ["LOCAL_RANK"])
     ddp_world_size = int(os.environ["WORLD_SIZE"])
-    device_type = f"cuda:{ddp_local_rank}"
-    torch.cuda.set_device(device=device_type)
+    device = f"cuda:{ddp_local_rank}"
+    torch.cuda.set_device(device=device)
     master_process = ddp_rank == 0
 else:
     ddp_rank = 0
@@ -50,6 +50,8 @@ else:
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         device = "mps"
     print(f"using device: {device}")
+
+device_type = "cuda" if device.startswith("cuda") else "cpu"
 
 torch.manual_seed(333)
 if torch.cuda.is_available():
@@ -72,15 +74,16 @@ val_loader = DataLoader(
 
 model = GPT(GPTConfig())
 model.to(device)
+optimizer = model.configure_optimizer(weight_decay=0.1, lr=6e-4, device=device)
 model = torch.compile(model)
+raw_model = unwrap_model(model)
 
 if ddp:
     model = torch.nn.parallel.DistributedDataParallel(
         model, device_ids=[ddp_local_rank]
     )
 
-optimizer = model.configure_optimizer(weight_decay=0.1, lr=6e-4, device=device)
-raw_model = unwrap_model(model)
+
 
 log_dir = "log"
 os.makedirs(log_dir, exist_ok=True)
