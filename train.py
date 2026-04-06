@@ -51,6 +51,9 @@ else:
     print(f"using device: {device}")
 
 torch.manual_seed(333)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(333)
+torch.set_float32_matmul_precision("high")
 
 sim_batch_size = 524288
 B, T = 16, 1024
