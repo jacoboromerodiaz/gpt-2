@@ -53,10 +53,9 @@ class DataLoader:
         return shard
 
     def set(self, loader_checkpoint):
-        self.current_position = (
-            loader_checkpoint["current_position"] + self.B * self.T * self.process_rank
-        )
+        self.current_position = loader_checkpoint["current_position"]
         self.current_shard = loader_checkpoint["current_shard"]
+        self.rng.bit_generator.state = loader_checkpoint["rng_state"]
         self.tokens = load_tokens(self.shards[self.current_shard])
         if self.current_position + (self.B * self.T * self.num_processes + 1) > len(
             self.tokens
