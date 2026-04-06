@@ -21,6 +21,7 @@ class DataLoader:
         self.process_rank = process_rank
         self.num_processes = num_processes
         assert split in {"train", "val"}, "Invalid split"
+        self.split = split
         self.rng = np.random.default_rng(1337)
 
         data_root = "edu_fineweb10B"
