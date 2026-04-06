@@ -1,6 +1,11 @@
 import os
 import numpy as np
 import torch
+import tiktoken
+
+# TODO implement our own tokenizer
+enc = tiktoken.get_encoding("gpt2")
+eot = enc._special_tokens["<|endoftext|>"]
 
 
 def load_tokens(file):
@@ -16,6 +21,7 @@ class DataLoader:
         self.process_rank = process_rank
         self.num_processes = num_processes
         assert split in {"train", "val"}, "Invalid split"
+        self.rng = np.random.default_rng(1337)
 
         data_root = "edu_fineweb10B"
         shards = os.listdir(data_root)
@@ -32,8 +38,39 @@ class DataLoader:
         self.current_pos = 0
         self.reset()
 
+    def load_shard(
+        self, filename
+    ):  # added from PR: https://github.com/karpathy/build-nanogpt/pull/52/files
+        shard = load_tokens(filename)
+        if self.split == "train":
+            eot_positions = (torch.where(shard == enc.eot_token)[0] + 1).tolist()
+            documents = [
+                shard[start:end]
+                for start, end in zip([0] + eot_positions[:-1], eot_positions)
+            ]
+            self.rng.shuffle(documents)
+            shard = torch.cat(documents)
+        return shard
+
+    def set(self, loader_checkpoint):
+        self.current_position = (
+            loader_checkpoint["current_position"] + self.B * self.T * self.process_rank
+        )
+        self.current_shard = loader_checkpoint["current_shard"]
+        self.tokens = load_tokens(self.shards[self.current_shard])
+        if self.current_position + (self.B * self.T * self.num_processes + 1) > len(
+            self.tokens
+        ):
+            self.current_shard += 1
+            if self.current_shard == len(self.shards):
+                self.reset()
+            else:
+                self.tokens = self.load_shard(self.shards[self.current_shard])
+                self.current_position = self.B * self.T * self.process_rank
+
     def reset(self):
         self.current_shard = 0
+        self.rng.shuffle(self.shards) if self.split == "train" else None
         self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_pos = self.B * self.T * self.process_rank
 
