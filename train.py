@@ -66,10 +66,10 @@ assert (
 grad_accum_steps = sim_batch_size // (B * T * ddp_world_size)
 
 train_loader = DataLoader(
-    B=4, T=32, process_rank=ddp_rank, num_processes=ddp_world_size, split="train"
+    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train"
 )
 val_loader = DataLoader(
-    B=4, T=32, process_rank=ddp_rank, num_processes=ddp_world_size, split="val"
+    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val"
 )
 
 model = GPT(GPTConfig())
@@ -94,14 +94,14 @@ def main():
         t0 = time.time()
         last_step = step == max_steps - 1
 
-        if step % 250 == 0 or last_step:
+        if step > 0 and (step % 5000 == 0 or last_step):
             model.eval()
             val_loader.reset()
             with torch.no_grad():
                 val_loss_accum = 0.0
                 val_loss_steps = 20
                 for _ in range(val_loss_steps):
-                    x, y = val_loader.next_batch()
+                    x, y = val_loader.get_batch()
                     x, y = x.to(device), y.to(device)
                     with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                         logits, loss = model(x, y)
@@ -113,7 +113,7 @@ def main():
                 print(f"validation loss: {val_loss_accum.item():.4f}")
                 with open(log_file, "a") as f:
                     f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-                if step > 0 and (step % 2500 == 0 or last_step):
+                if step > 0 and (step % 5000 == 0 or last_step):
                     checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                     checkpoint = {
                         "model": raw_model.state_dict(),
@@ -123,14 +123,14 @@ def main():
                         "val_loss": val_loss_accum.item(),
                         "train_loader": {
                             "current_shard": train_loader.current_shard,
-                            "current_position": train_loader.current_position,
+                            "current_position": train_loader.current_pos,
                             "rng_state": train_loader.rng.bit_generator.state,
                         },
                         "torch_rng_state": torch.get_rng_state(),
                     }
                     torch.save(checkpoint, checkpoint_path)
 
-        if step % 250 == 0 or last_step:
+        if step % 5000 == 0 or last_step:
             num_correct_norm = 0
             num_total = 0
             raw_model.eval()
