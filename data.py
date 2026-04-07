@@ -54,11 +54,11 @@ class DataLoader:
         return shard
 
     def set(self, loader_checkpoint):
-        self.current_position = loader_checkpoint["current_position"]
+        self.current_pos = loader_checkpoint["current_pos"]
         self.current_shard = loader_checkpoint["current_shard"]
         self.rng.bit_generator.state = loader_checkpoint["rng_state"]
         self.tokens = load_tokens(self.shards[self.current_shard])
-        if self.current_position + (self.B * self.T * self.num_processes + 1) > len(
+        if self.current_pos + (self.B * self.T * self.num_processes + 1) > len(
             self.tokens
         ):
             self.current_shard += 1
@@ -66,7 +66,7 @@ class DataLoader:
                 self.reset()
             else:
                 self.tokens = self.load_shard(self.shards[self.current_shard])
-                self.current_position = self.B * self.T * self.process_rank
+                self.current_pos = self.B * self.T * self.process_rank
 
     def reset(self):
         self.current_shard = 0
