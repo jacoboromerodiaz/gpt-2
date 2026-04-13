@@ -59,7 +59,7 @@ if torch.cuda.is_available():
 torch.set_float32_matmul_precision("high")
 
 sim_batch_size = 524288
-B, T = 16, 1024
+B, T = 2, 1024
 assert (
     sim_batch_size % (B * T * ddp_world_size) == 0
 ), "sim_batch_size must be divisible by B * T * ddp_world_size"
@@ -130,7 +130,7 @@ def main():
                     }
                     torch.save(checkpoint, checkpoint_path)
 
-        if step % 5000 == 0 or last_step:
+        if step > 0 and (step % 5000 == 0 or last_step):
             num_correct_norm = 0
             num_total = 0
             raw_model.eval()
