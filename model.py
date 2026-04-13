@@ -43,6 +43,30 @@ class CasualSelfAttention(nn.Module):
         return y
 
 
+class FlashCausalSelfAttention(nn.Module):
+
+    def __init__(self, config):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.c_proj.GPT_SCALE_INIT = 1
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+
+    def forward(self, x):
+        B, T, C = x.size()
+        qkv = self.c_attn(x)
+        q, k, v = qkv.split(self.n_embd, dim=2)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        y = self.c_proj(y)
+        return y
+
+
 class FeedForward(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -64,7 +88,11 @@ class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
-        self.attn = CasualSelfAttention(config)
+        self.attn = (
+            CasualSelfAttention(config)
+            if not config.flash_attention
+            else FlashCausalSelfAttention(config)
+        )
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = FeedForward(config)
 
@@ -82,6 +110,7 @@ class GPTConfig:  # 124M
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.2
+    flash_attention: bool = False
 
     @property
     def head_size(self):
