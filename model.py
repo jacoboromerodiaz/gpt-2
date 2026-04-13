@@ -28,7 +28,7 @@ class Head(nn.Module):
         return out
 
 
-class CasualSelfAttention(nn.Module):
+class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.heads = nn.ModuleList([Head(config) for _ in range(config.n_head)])
@@ -89,7 +89,7 @@ class Block(nn.Module):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = (
-            CasualSelfAttention(config)
+            CausalSelfAttention(config)
             if not config.flash_attention
             else FlashCausalSelfAttention(config)
         )
