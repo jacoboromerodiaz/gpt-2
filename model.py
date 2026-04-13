@@ -110,7 +110,7 @@ class GPTConfig:  # 124M
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.2
-    flash_attention: bool = False
+    flash_attention: bool = True
 
     @property
     def head_size(self):
