@@ -1,10 +1,36 @@
 from datasets import load_dataset
-import os
 import tiktoken
 import torch
 from torch.nn import nn
+from torch.utils.data import Dataset
+
 from gpt2.model import GPT, GPTConfig
 from dataclasses import fields
+
+
+class AlpacaDataset(Dataset):
+    def __init__(self, enc, max_length=1024):
+        ds = load_dataset("yahma/alpaca-cleaned", split="train")
+        self.examples = []
+        for row in ds:
+            text = (
+                f"<|im_start|>user\n{row['instruction']}"
+                + (f"\n{row['input']}" if row["input"] else "")
+                + f"<|im_end|>\n<|im_start|>assistant\n{row['output']}<|im_end|>"
+            )
+            tokens = enc.encode(text, allowed_special={"<|im_start|>", "<|im_end|>"})
+
+            if len(tokens) <= max_length:
+                self.examples.append(torch.tensor(tokens, dtype=torch.long))
+
+    def __len__(self):
+        return len(self.examples)
+
+    def __getitem__(self, idx):
+        tokens = self.examples[idx]
+        x = tokens[:-1]
+        y = tokens[1:]
+        return x, y
 
 
 def load_checkpoint(path, device, device_type):
@@ -36,11 +62,6 @@ def load_checkpoint(path, device, device_type):
     optimizer.load_state_dict(opt_state_dict)
 
     return model, optimizer, checkpoint
-
-
-def filter_length(example):
-    text = format_example(example)
-    return len(enc.encode(text)) < 900
 
 
 def extend_encoder(enc):
