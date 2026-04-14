@@ -16,6 +16,7 @@ from hellaswag import iterate_examples, render_example, get_most_likely_row
 # hardcoded from gpt-3 paper
 max_lr = 6e-4
 min_lr = max_lr * 0.1
+weight_decay = 0.1
 warmup_steps = 715
 max_steps = 19073
 
@@ -61,6 +62,20 @@ def setup_device():
     )
 
 
+def load_checkpoint(path, device, device_type):
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    model = GPT(checkpoint["config"])
+    model.to(device)
+    model.load_state_dict(checkpoint["model"])
+
+    opt_state = checkpoint["optimizer"]
+    lr = opt_state["param_groups"][0]["lr"]
+    wd = opt_state["param_groups"][0]["weight_decay"]
+    optimizer = model.configure_optimizer(weight_decay=wd, lr=lr, device=device_type)
+    optimizer.load_state_dict(opt_state)
+    return model, optimizer, checkpoint
+
+
 def get_lr(step):
     if step < warmup_steps:
         return max_lr * (step + 1) / warmup_steps
@@ -101,9 +116,42 @@ val_loader = DataLoader(
     B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val"
 )
 
-model = GPT(GPTConfig())
-model.to(device)
-optimizer = model.configure_optimizer(weight_decay=0.1, lr=6e-4, device=device)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+log_dir = os.path.join(BASE_DIR, "..", "log")
+log_dir = os.path.abspath(log_dir)  # normaliza el path
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, "train.log")
+
+resume_training = True
+if resume_training:
+    checkpoint_files = sorted(
+        f for f in os.listdir(log_dir) if f.startswith("model_") and f.endswith(".pt")
+    )
+    assert checkpoint_files, "no checkpoints found"
+
+    model, optimizer, checkpoint = load_checkpoint(
+        os.path.join(log_dir, checkpoint_files[-1]), device, device_type
+    )
+    model.load_state_dict(checkpoint["model"])
+    train_loader.set(checkpoint["train_loader"])
+    current_step = checkpoint["step"] + 1
+
+    if master_process:
+        print(
+            f"resuming training from step {current_step}",
+            f"with val_loss={checkpoint['val_loss']:.4f}",
+        )
+else:
+    model = GPT(GPTConfig(vocab_size=50304))
+    model.to(device)
+    optimizer = model.configure_optimizer(
+        weight_decay=weight_decay, learning_rate=max_lr, device_type=device_type
+    )
+    current_step = 0
+
+    if master_process:
+        open(log_file, "w").close()
+
 model = torch.compile(model)
 raw_model = unwrap_model(model)
 
@@ -113,13 +161,8 @@ if ddp:
     )
 
 
-log_dir = "log"
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, "train.log")
-
-
 def main():
-    for step in range(max_steps):
+    for step in range(current_step, max_steps):
         t0 = time.time()
         last_step = step == max_steps - 1
 
