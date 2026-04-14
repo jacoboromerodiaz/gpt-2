@@ -1,7 +1,6 @@
 .DS_Store
 .venv/
 edu_fineweb10B/
-gpt-2/config.yaml
-gpt-2/best_model.pt
-gpt-2/__pycache__
-gpt-2/playground.ipynb
+gpt2/config.yaml
+gpt2/log/*.pt
+gpt2/__pycache__
