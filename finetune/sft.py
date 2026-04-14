@@ -1,0 +1,80 @@
+import tiktoken
+import torch
+from gpt2.model import GPT, GPTConfig
+from dataclasses import fields
+
+
+def load_checkpoint(path, device, device_type):
+    checkpoint = torch.load(path, map_location=device)
+    gpt_fields = {f.name for f in fields(GPTConfig)}
+    config_kwargs = {k: v for k, v in checkpoint["config"].items() if k in gpt_fields}
+    config = GPTConfig(**config_kwargs)
+
+    model = GPT(config)
+    model.to(device)
+
+    # artifact of torch.compile
+    def _remove_unwanted_prefix(state_dict):
+        unwanted_prefix = "_orig_mod."
+        clean_state_dict = {
+            (k[len(unwanted_prefix) :] if k.startswith(unwanted_prefix) else k): v
+            for k, v in state_dict.items()
+        }
+        return clean_state_dict
+
+    model_state_dict = _remove_unwanted_prefix(checkpoint["model"])
+    model.load_state_dict(model_state_dict, strict=False)
+
+    opt_state = checkpoint["optimizer"]
+    lr = opt_state["param_groups"][0]["lr"]
+    wd = opt_state["param_groups"][0]["weight_decay"]
+    optimizer = model.configure_optimizer(weight_decay=wd, lr=lr, device=device_type)
+    opt_state_dict = _remove_unwanted_prefix(checkpoint["optimizer"])
+    optimizer.load_state_dict(opt_state_dict)
+
+    return model, optimizer, checkpoint
+
+
+def filter_length(example):
+    text = format_example(example)
+    return len(enc.encode(text)) < 900  # margen de seguridad
+
+
+def extend_encoder(enc):
+    enc_extended = tiktoken.Encoding(
+        name="gpt2_chat",
+        pat_str=enc._pat_str,
+        mergeable_ranks=enc._mergeable_ranks,
+        special_tokens={
+            **enc._special_tokens,
+            "<|im_start|>": 50257,
+            "<|im_end|>": 50258,
+        },
+    )
+    return enc_extended
+
+
+def format_example(enc, row):
+    text = (
+        f"<|im_start|>user\n{row['instruction']}\n<|im_end|>\n"
+        f"<|im_start|>assistant\n{row['output']}<|im_end|>"
+    )
+    return enc.encode(text, allowed_special={"<|im_start|>", "<|im_end|>"})
+
+
+if __name__ == "__main__":
+    enc = tiktoken.get_encoding("gpt2")
+    device = "mps"
+    device_type = "cpu"
+    enc_extended = extend_encoder(enc)
+
+    checkpoint_file = "/Users/jacoboromerodiaz/Projects/gpt-2/gpt2/best_model.pt"
+
+    model, optimizer, checkpoint = load_checkpoint(checkpoint_file, device, device_type)
+
+    with torch.no_grad():
+        mean_emb = model.transformer.wte.weight[:50257].mean(0)
+        model.transformer.wte.weight[50257] = mean_emb  # <|im_start|>
+        model.transformer.wte.weight[50258] = mean_emb  # <|im_end|>
+
+    print("Model loaded and embeddings extended")
