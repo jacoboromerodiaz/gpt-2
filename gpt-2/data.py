@@ -24,7 +24,7 @@ class DataLoader:
         self.split = split
         self.rng = np.random.default_rng(1337)
 
-        data_root = "edu_fineweb10B"
+        data_root = "../edu_fineweb10B"
         shards = os.listdir(data_root)
         shards = [s for s in shards if split in s]
         shards = sorted(shards)
@@ -54,7 +54,7 @@ class DataLoader:
         return shard
 
     def set(self, loader_checkpoint):
-        self.current_pos = loader_checkpoint["current_pos"]
+        self.current_pos = loader_checkpoint["current_position"]
         self.current_shard = loader_checkpoint["current_shard"]
         self.rng.bit_generator.state = loader_checkpoint["rng_state"]
         self.tokens = load_tokens(self.shards[self.current_shard])
