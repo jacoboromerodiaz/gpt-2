@@ -86,11 +86,19 @@ if __name__ == "__main__":
     master_process = ctx.master_process
 
     grad_accum_steps = 1
+    max_lr = 1e-4
+    min_lr = 1e-5
+    warmup_steps = 700
+    ft_lr = 1e-6
+    weight_decay = 0.1
+
     epochs = 5
 
     checkpoint_file = "/Users/jacoboromerodiaz/Projects/gpt-2/gpt2/model_10000.pt"
 
-    model, optimizer, checkpoint = load_checkpoint(checkpoint_file, device, device_type)
+    model, _, checkpoint = load_checkpoint(checkpoint_file, device, device_type)
+    optimizer = model.configure_optimizer(weight_decay=weight_decay, lr=ft_lr, device=device_type)
+
     train_dataset, val_dataset = (AlpacaDataset(enc_extended, split=s) for s in ("train", "val"))
     train_loader = DataLoader(train_dataset, shuffle=True,  batch_size=8, collate_fn=collate_fn)
     val_loader   = DataLoader(val_dataset,   shuffle=False, batch_size=8, collate_fn=collate_fn)
@@ -116,7 +124,7 @@ if __name__ == "__main__":
             if ddp:
                 dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
             norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            lr = get_lr(step)
+            lr = get_lr(step, max_lr, min_lr, warmup_steps, max_steps)
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
             optimizer.step()
@@ -132,5 +140,5 @@ if __name__ == "__main__":
                     f", lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms",
                     f"| tok/sec: {tokens_per_sec:.2f}",
                 )
-                with open(log_file, "a") as f:
-                    f.write(f"{step} train {loss_accum.item():.6f}\n")
+                # with open(log_file, "a") as f:
+                #     f.write(f"{step} train {loss_accum.item():.6f}\n")
