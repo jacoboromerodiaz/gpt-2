@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from gpt2.model import GPT, GPTConfig
 from gpt2.train import load_checkpoint, setup_device, get_lr
+from gpt2.utils import unwrap_model
 
 class AlpacaDataset(Dataset):
     def __init__(self, enc, max_length=1024, split="train", val_ratio=0.1, seed=42):
@@ -98,6 +99,9 @@ if __name__ == "__main__":
 
     model, _, checkpoint = load_checkpoint(checkpoint_file, device, device_type)
     optimizer = model.configure_optimizer(weight_decay=weight_decay, lr=ft_lr, device=device_type)
+
+    model = torch.compile(model)
+    raw_model = unwrap_model(model)
 
     train_dataset, val_dataset = (AlpacaDataset(enc_extended, split=s) for s in ("train", "val"))
     train_loader = DataLoader(train_dataset, shuffle=True,  batch_size=8, collate_fn=collate_fn)
