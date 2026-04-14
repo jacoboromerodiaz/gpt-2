@@ -6,6 +6,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed import init_process_group, destroy_process_group
 
+from types import SimpleNamespace
+
 from data import DataLoader
 from model import GPT, GPTConfig
 from utils import unwrap_model
@@ -16,6 +18,47 @@ max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 715
 max_steps = 19073
+
+
+def setup_device():
+    ddp = int(os.environ.get("RANK", -1)) != -1
+
+    if ddp:
+        assert torch.cuda.is_available(), "No cuda available for DDP"
+        init_process_group(backend="nccl")
+        ddp_rank = int(os.environ["RANK"])
+        ddp_local_rank = int(os.environ["LOCAL_RANK"])
+        ddp_world_size = int(os.environ["WORLD_SIZE"])
+        device = f"cuda:{ddp_local_rank}"
+        torch.cuda.set_device(device)
+        master_process = ddp_rank == 0
+    else:
+        ddp_rank = 0
+        ddp_local_rank = 0
+        ddp_world_size = 1
+        master_process = True
+
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+
+    device_type = "cuda" if device.startswith("cuda") else "cpu"
+
+    if master_process:
+        print(f"using device: {device}")
+
+    return SimpleNamespace(
+        ddp=ddp,
+        ddp_rank=ddp_rank,
+        ddp_local_rank=ddp_local_rank,
+        ddp_world_size=ddp_world_size,
+        device=device,
+        device_type=device_type,
+        master_process=master_process,
+    )
 
 
 def get_lr(step):
@@ -29,30 +72,15 @@ def get_lr(step):
     return min_lr + cos_coeff * (max_lr - min_lr)
 
 
-ddp = int(os.environ.get("RANK", -1)) != -1
-if ddp:
-    assert torch.cuda.is_available(), "No cuda available for DDP"
-    init_process_group(backend="nccl")
-    ddp_rank = int(os.environ["RANK"])
-    ddp_local_rank = int(os.environ["LOCAL_RANK"])
-    ddp_world_size = int(os.environ["WORLD_SIZE"])
-    device = f"cuda:{ddp_local_rank}"
-    torch.cuda.set_device(device=device)
-    master_process = ddp_rank == 0
-    print(f"using device: {device}")
-else:
-    ddp_rank = 0
-    ddp_local_rank = 0
-    ddp_world_size = 1
-    master_process = True
-    device = "cpu"
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = "mps"
-    print(f"using device: {device}")
+ctx = setup_device()
 
-device_type = "cuda" if device.startswith("cuda") else "cpu"
+ddp = ctx.ddp
+ddp_rank = ctx.ddp_rank
+ddp_local_rank = ctx.ddp_local_rank
+ddp_world_size = ctx.ddp_world_size
+device = ctx.device
+device_type = ctx.device_type
+master_process = ctx.master_process
 
 torch.manual_seed(333)
 if torch.cuda.is_available():
