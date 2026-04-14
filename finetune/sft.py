@@ -1,19 +1,18 @@
 from datasets import load_dataset
 import tiktoken
 import time
+import random
 import torch
+import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
 
 from gpt2.model import GPT, GPTConfig
-from gpt2.train import load_checkpoint, setup_device
-
-from dataclasses import fields
-
+from gpt2.train import load_checkpoint, setup_device, get_lr
 
 class AlpacaDataset(Dataset):
-    def __init__(self, enc, max_length=1024):
+    def __init__(self, enc, max_length=1024, split="train", val_ratio=0.1, seed=42):
         ds = load_dataset("yahma/alpaca-cleaned", split="train")
-        self.examples = []
+        all_examples = []
         for row in ds:
             text = (
                 f"<|im_start|>user\n{row['instruction']}"
@@ -22,7 +21,15 @@ class AlpacaDataset(Dataset):
             )
             tokens = enc.encode(text, allowed_special={"<|im_start|>", "<|im_end|>"})
             if len(tokens) <= max_length:
-                self.examples.append(torch.tensor(tokens, dtype=torch.long))
+                all_examples.append(torch.tensor(tokens, dtype=torch.long))
+
+        rng = random.Random(seed)
+        rng.shuffle(all_examples)
+        n_val = int(len(all_examples) * val_ratio)
+        if split == "val":
+            self.examples = all_examples[:n_val]
+        else:
+            self.examples = all_examples[n_val:]
 
     def __len__(self):
         return len(self.examples)
@@ -47,7 +54,6 @@ def collate_fn(batch):
         ys_pad[i, : y.size(0)] = y
 
     return xs_pad, ys_pad
-
 
 def extend_encoder(enc):
     enc_extended = tiktoken.Encoding(
@@ -80,48 +86,51 @@ if __name__ == "__main__":
     master_process = ctx.master_process
 
     grad_accum_steps = 1
+    epochs = 5
 
     checkpoint_file = "/Users/jacoboromerodiaz/Projects/gpt-2/gpt2/model_10000.pt"
 
     model, optimizer, checkpoint = load_checkpoint(checkpoint_file, device, device_type)
+    train_dataset, val_dataset = (AlpacaDataset(enc_extended, split=s) for s in ("train", "val"))
+    train_loader = DataLoader(train_dataset, shuffle=True,  batch_size=8, collate_fn=collate_fn)
+    val_loader   = DataLoader(val_dataset,   shuffle=False, batch_size=8, collate_fn=collate_fn)
 
-    dataset = AlpacaDataset(enc_extended)
-    train_loader = DataLoader(
-        dataset, batch_size=8, shuffle=True, collate_fn=collate_fn
-    )
-
-    # reuse train logic from train.py
-    model.train()
-    loss_accum = 0.0
-    optimizer.zero_grad()
-    for micro_step in range(grad_accum_steps):
-        x, y = train_loader.get_batch()
-        x, y = x.to(device), y.to(device)
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-            logits, loss = model(x, y)
-        loss /= grad_accum_steps
-        loss_accum += loss.detach()
-        if ddp:
-            model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
-        loss.backward()
-    if ddp:
-        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-    lr = get_lr(step)
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = lr
-    optimizer.step()
-    t1 = time.time()
-    dt = t1 - t0  # time difference in seconds
-    tokens_processed = (
-        train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
-    )
-    tokens_per_sec = tokens_processed / dt
-    if master_process:
-        print(
-            f"step {step:5d} | loss: {loss_accum.item():.6f} |"
-            f", lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms",
-            f"| tok/sec: {tokens_per_sec:.2f}",
-        )
-        with open(log_file, "a") as f:
-            f.write(f"{step} train {loss_accum.item():.6f}\n")
+    #reuse train logic from train.py
+    max_steps = len(train_dataset // 8) # dataloader bs
+    for epoch in range(epochs):
+        for step in range(max_steps):
+            t0 = time.time()
+            last_step = step == max_steps - 1
+            loss_accum = 0.0
+            optimizer.zero_grad()
+            for micro_step in range(grad_accum_steps):
+                x, y = next(iter(train_loader))
+                x, y = x.to(device), y.to(device)
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    logits, loss = model(x, y)
+                loss /= grad_accum_steps
+                loss_accum += loss.detach()
+                if ddp:
+                    model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
+                loss.backward()
+            if ddp:
+                dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            lr = get_lr(step)
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = lr
+            optimizer.step()
+            t1 = time.time()
+            dt = t1 - t0  # time difference in seconds
+            tokens_processed = (
+                train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
+            )
+            tokens_per_sec = tokens_processed / dt
+            if master_process:
+                print(
+                    f"step {step:5d} | loss: {loss_accum.item():.6f} |"
+                    f", lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms",
+                    f"| tok/sec: {tokens_per_sec:.2f}",
+                )
+                with open(log_file, "a") as f:
+                    f.write(f"{step} train {loss_accum.item():.6f}\n")
