@@ -1,9 +1,12 @@
 from datasets import load_dataset
 import tiktoken
+import time
 import torch
 from torch.utils.data import Dataset, DataLoader
 
 from gpt2.model import GPT, GPTConfig
+from gpt2.train import load_checkpoint, setup_device
+
 from dataclasses import fields
 
 
@@ -18,7 +21,6 @@ class AlpacaDataset(Dataset):
                 + f"<|im_end|>\n<|im_start|>assistant\n{row['output']}<|im_end|>"
             )
             tokens = enc.encode(text, allowed_special={"<|im_start|>", "<|im_end|>"})
-
             if len(tokens) <= max_length:
                 self.examples.append(torch.tensor(tokens, dtype=torch.long))
 
@@ -47,37 +49,6 @@ def collate_fn(batch):
     return xs_pad, ys_pad
 
 
-def load_checkpoint(path, device, device_type):
-    checkpoint = torch.load(path, map_location=device)
-    gpt_fields = {f.name for f in fields(GPTConfig)}
-    config_kwargs = {k: v for k, v in checkpoint["config"].items() if k in gpt_fields}
-    config = GPTConfig(**config_kwargs)
-
-    model = GPT(config)
-    model.to(device)
-
-    # artifact of torch.compile
-    def _remove_unwanted_prefix(state_dict):
-        unwanted_prefix = "_orig_mod."
-        clean_state_dict = {
-            (k[len(unwanted_prefix) :] if k.startswith(unwanted_prefix) else k): v
-            for k, v in state_dict.items()
-        }
-        return clean_state_dict
-
-    model_state_dict = _remove_unwanted_prefix(checkpoint["model"])
-    model.load_state_dict(model_state_dict, strict=False)
-
-    opt_state = checkpoint["optimizer"]
-    lr = opt_state["param_groups"][0]["lr"]
-    wd = opt_state["param_groups"][0]["weight_decay"]
-    optimizer = model.configure_optimizer(weight_decay=wd, lr=lr, device=device_type)
-    opt_state_dict = _remove_unwanted_prefix(checkpoint["optimizer"])
-    optimizer.load_state_dict(opt_state_dict)
-
-    return model, optimizer, checkpoint
-
-
 def extend_encoder(enc):
     enc_extended = tiktoken.Encoding(
         name="gpt2_chat",
@@ -98,13 +69,59 @@ if __name__ == "__main__":
     device_type = "cpu"
     enc_extended = extend_encoder(enc)
 
-    checkpoint_file = "/Users/jacoboromerodiaz/Projects/gpt-2/gpt2/best_model.pt"
+    ctx = setup_device()
+
+    ddp = ctx.ddp
+    ddp_rank = ctx.ddp_rank
+    ddp_local_rank = ctx.ddp_local_rank
+    ddp_world_size = ctx.ddp_world_size
+    device = ctx.device
+    device_type = ctx.device_type
+    master_process = ctx.master_process
+
+    grad_accum_steps = 1
+
+    checkpoint_file = "/Users/jacoboromerodiaz/Projects/gpt-2/gpt2/model_10000.pt"
 
     model, optimizer, checkpoint = load_checkpoint(checkpoint_file, device, device_type)
 
     dataset = AlpacaDataset(enc_extended)
-    loader = DataLoader(dataset, batch_size=8, shuffle=True, collate_fn=collate_fn)
+    train_loader = DataLoader(
+        dataset, batch_size=8, shuffle=True, collate_fn=collate_fn
+    )
 
-    x, y = next(iter(loader))
-    print(x.shape, y.shape)
-    print(x[0])
+    # reuse train logic from train.py
+    model.train()
+    loss_accum = 0.0
+    optimizer.zero_grad()
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.get_batch()
+        x, y = x.to(device), y.to(device)
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
+        loss /= grad_accum_steps
+        loss_accum += loss.detach()
+        if ddp:
+            model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
+        loss.backward()
+    if ddp:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
+    optimizer.step()
+    t1 = time.time()
+    dt = t1 - t0  # time difference in seconds
+    tokens_processed = (
+        train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
+    )
+    tokens_per_sec = tokens_processed / dt
+    if master_process:
+        print(
+            f"step {step:5d} | loss: {loss_accum.item():.6f} |"
+            f", lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms",
+            f"| tok/sec: {tokens_per_sec:.2f}",
+        )
+        with open(log_file, "a") as f:
+            f.write(f"{step} train {loss_accum.item():.6f}\n")
