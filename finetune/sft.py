@@ -1,5 +1,8 @@
+from datasets import load_dataset
+import os
 import tiktoken
 import torch
+from torch.nn import nn
 from gpt2.model import GPT, GPTConfig
 from dataclasses import fields
 
@@ -37,7 +40,7 @@ def load_checkpoint(path, device, device_type):
 
 def filter_length(example):
     text = format_example(example)
-    return len(enc.encode(text)) < 900  # margen de seguridad
+    return len(enc.encode(text)) < 900
 
 
 def extend_encoder(enc):
@@ -52,6 +55,21 @@ def extend_encoder(enc):
         },
     )
     return enc_extended
+
+
+def extend_embd(model):
+    wte = model.transformer.wte
+    n_embd = model.transformer.wte.weight.shape[1]
+
+    extended_wte = nn.Embedding(50259, n_embd)
+    extended_wte.weight.data[:50257] = wte.weight.data
+    model.transformer.wte = nn.Embedding(50259, n_embd)
+
+    with torch.no_grad():
+        mean_emb = model.transformer.wte.weight[:50257].mean(0)
+        model.transformer.wte.weight[50257] = mean_emb  # <|im_start|>
+        model.transformer.wte.weight[50258] = mean_emb  # <|im_end|>
+    print("Model loaded and embeddings extended")
 
 
 def format_example(enc, row):
@@ -71,10 +89,4 @@ if __name__ == "__main__":
     checkpoint_file = "/Users/jacoboromerodiaz/Projects/gpt-2/gpt2/best_model.pt"
 
     model, optimizer, checkpoint = load_checkpoint(checkpoint_file, device, device_type)
-
-    with torch.no_grad():
-        mean_emb = model.transformer.wte.weight[:50257].mean(0)
-        model.transformer.wte.weight[50257] = mean_emb  # <|im_start|>
-        model.transformer.wte.weight[50258] = mean_emb  # <|im_end|>
-
-    print("Model loaded and embeddings extended")
+    extended_model = extend_embd(model)
