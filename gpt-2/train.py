@@ -88,7 +88,7 @@ if torch.cuda.is_available():
 torch.set_float32_matmul_precision("high")
 
 sim_batch_size = 524288
-B, T = 2, 1024
+B, T = 16, 1024
 assert (
     sim_batch_size % (B * T * ddp_world_size) == 0
 ), "sim_batch_size must be divisible by B * T * ddp_world_size"
