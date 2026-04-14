@@ -1,8 +1,7 @@
 from datasets import load_dataset
 import tiktoken
 import torch
-from torch.nn import nn
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 from gpt2.model import GPT, GPTConfig
 from dataclasses import fields
@@ -31,6 +30,21 @@ class AlpacaDataset(Dataset):
         x = tokens[:-1]
         y = tokens[1:]
         return x, y
+
+
+def collate_fn(batch):
+    xs, ys = zip(*batch)
+
+    max_len = max(x.size(0) for x in xs)
+
+    xs_pad = torch.zeros(len(xs), max_len, dtype=torch.long)
+    ys_pad = torch.full((len(ys), max_len), fill_value=-100, dtype=torch.long)
+
+    for i, (x, y) in enumerate(zip(xs, ys)):
+        xs_pad[i, : x.size(0)] = x
+        ys_pad[i, : y.size(0)] = y
+
+    return xs_pad, ys_pad
 
 
 def load_checkpoint(path, device, device_type):
@@ -78,29 +92,6 @@ def extend_encoder(enc):
     return enc_extended
 
 
-def extend_embd(model):
-    wte = model.transformer.wte
-    n_embd = model.transformer.wte.weight.shape[1]
-
-    extended_wte = nn.Embedding(50259, n_embd)
-    extended_wte.weight.data[:50257] = wte.weight.data
-    model.transformer.wte = nn.Embedding(50259, n_embd)
-
-    with torch.no_grad():
-        mean_emb = model.transformer.wte.weight[:50257].mean(0)
-        model.transformer.wte.weight[50257] = mean_emb  # <|im_start|>
-        model.transformer.wte.weight[50258] = mean_emb  # <|im_end|>
-    print("Model loaded and embeddings extended")
-
-
-def format_example(enc, row):
-    text = (
-        f"<|im_start|>user\n{row['instruction']}\n<|im_end|>\n"
-        f"<|im_start|>assistant\n{row['output']}<|im_end|>"
-    )
-    return enc.encode(text, allowed_special={"<|im_start|>", "<|im_end|>"})
-
-
 if __name__ == "__main__":
     enc = tiktoken.get_encoding("gpt2")
     device = "mps"
@@ -110,4 +101,10 @@ if __name__ == "__main__":
     checkpoint_file = "/Users/jacoboromerodiaz/Projects/gpt-2/gpt2/best_model.pt"
 
     model, optimizer, checkpoint = load_checkpoint(checkpoint_file, device, device_type)
-    extended_model = extend_embd(model)
+
+    dataset = AlpacaDataset(enc_extended)
+    loader = DataLoader(dataset, batch_size=8, shuffle=True, collate_fn=collate_fn)
+
+    x, y = next(iter(loader))
+    print(x.shape, y.shape)
+    print(x[0])
