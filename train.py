@@ -26,7 +26,7 @@ def get_lr(step):
     decay = (step - warmup_steps) / (max_steps - warmup_steps)
     assert 0 <= decay <= 1
     cos_coeff = 0.5 * (1.0 + math.cos(math.pi * decay))
-    return max_lr + cos_coeff * (max_lr - min_lr)
+    return min_lr + cos_coeff * (max_lr - min_lr)
 
 
 ddp = int(os.environ.get("RANK", -1)) != -1
@@ -39,6 +39,7 @@ if ddp:
     device = f"cuda:{ddp_local_rank}"
     torch.cuda.set_device(device=device)
     master_process = ddp_rank == 0
+    print(f"using device: {device}")
 else:
     ddp_rank = 0
     ddp_local_rank = 0
@@ -94,7 +95,7 @@ def main():
         t0 = time.time()
         last_step = step == max_steps - 1
 
-        if step > 0 and (step % 5000 == 0 or last_step):
+        if step > 0 and (step % 2500 == 0 or last_step):
             model.eval()
             val_loader.reset()
             with torch.no_grad():
@@ -130,7 +131,7 @@ def main():
                     }
                     torch.save(checkpoint, checkpoint_path)
 
-        if step > 0 and (step % 5000 == 0 or last_step):
+        if step > 0 and (step % 2500 == 0 or last_step):
             num_correct_norm = 0
             num_total = 0
             raw_model.eval()
