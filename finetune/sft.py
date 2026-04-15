@@ -43,12 +43,20 @@ class AlpacaDataset(Dataset):
         assistant_start_seq = torch.tensor(
             [50257] + enc_extended.encode("assistant\n"), dtype=torch.long
         )
-        # Enmascarar todo hasta (y incluido) ese header
         mask_until = find_subsequence(y, assistant_start_seq)
-        if mask_until is not None:
+        if mask_until is None:
+            # ejemplo malformado, enmascarar todo
+            y[:] = -100
+        else:
             y[:mask_until] = -100
         return x, y
 
+def find_subsequence(tensor, subseq):
+    n, m = tensor.size(0), subseq.size(0)
+    for i in range(n - m + 1):
+        if torch.all(tensor[i:i+m] == subseq):
+            return i + m
+    return None
 
 def collate_fn(batch):
     xs, ys = zip(*batch)
