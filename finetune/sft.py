@@ -140,7 +140,7 @@ if __name__ == "__main__":
                     try:
                         x, y = next(val_iter)
                     except StopIteration:
-                        train_iter = iter(val_loader)
+                        val_iter = iter(val_loader)
                         x, y = next(val_iter)
                     x, y = x.to(device), y.to(device)
                     with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
