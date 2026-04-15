@@ -24,7 +24,8 @@ class DataLoader:
         self.split = split
         self.rng = np.random.default_rng(1337)
 
-        data_root = "../edu_fineweb10B"
+        data_root = os.path.join(os.path.dirname(__file__),
+                                 "../edu_fineweb10B")
         shards = os.listdir(data_root)
         shards = [s for s in shards if split in s]
         shards = sorted(shards)
