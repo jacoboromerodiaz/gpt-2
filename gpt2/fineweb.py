@@ -46,9 +46,7 @@ if __name__ == "__main__":
     os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
     # download the dataset
-    fw = load_dataset(
-        "HuggingFaceFW/fineweb-edu", name=remote_name, split="train", streaming=True
-    )
+    fw = load_dataset("HuggingFaceFW/fineweb-edu", name=remote_name, split="train", streaming=True)
 
     nprocs = max(1, os.cpu_count() // 2)
     with mp.Pool(nprocs) as pool:
