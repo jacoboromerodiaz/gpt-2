@@ -7,7 +7,6 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
 
-from gpt2.model import GPT, GPTConfig
 from gpt2.train import load_checkpoint, setup_device, get_lr
 from gpt2.utils import unwrap_model
 
@@ -40,6 +39,14 @@ class AlpacaDataset(Dataset):
         tokens = self.examples[idx]
         x = tokens[:-1]
         y = tokens[1:]
+
+        assistant_start_seq = torch.tensor(
+            [50257] + enc_extended.encode("assistant\n"), dtype=torch.long
+        )
+        # Enmascarar todo hasta (y incluido) ese header
+        mask_until = find_subsequence(y, assistant_start_seq)
+        if mask_until is not None:
+            y[:mask_until] = -100
         return x, y
 
 
@@ -147,7 +154,7 @@ if __name__ == "__main__":
                 with open(log_file, "a") as f:
                     f.write(f"{step} val {val_loss_accum.item():.4f}\n")
                 if last_step:
-                    checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                    checkpoint_path = os.path.join(log_dir, f"ft_model_{step:05d}.pt")
                     checkpoint = {
                         "model": raw_model.state_dict(),
                         "config": raw_model.config,
@@ -179,7 +186,7 @@ if __name__ == "__main__":
             param_group["lr"] = lr
         optimizer.step()
         t1 = time.time()
-        dt = t1 - t0  # time difference in seconds
+        dt = t1 - t0
         if master_process:
             print(
                 f"step {step:5d} | loss: {loss_accum.item():.6f} |"
