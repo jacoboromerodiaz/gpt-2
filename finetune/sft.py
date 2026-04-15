@@ -95,9 +95,9 @@ if __name__ == "__main__":
 
     epochs = 5
 
-    checkpoint_file = "/Users/jacoboromerodiaz/Projects/gpt-2/gpt2/model_10000.pt"
+    checkpoint_file = "/Users/jacoboromerodiaz/Projects/gpt-2/gpt2/log/model_10000.pt"
 
-    model, _, checkpoint = load_checkpoint(checkpoint_file, device, device_type)
+    model, checkpoint = load_checkpoint(checkpoint_file, device, weights_only=True)
     optimizer = model.configure_optimizer(weight_decay=weight_decay, lr=ft_lr, device=device_type)
 
     model = torch.compile(model)
@@ -105,44 +105,78 @@ if __name__ == "__main__":
 
     train_dataset, val_dataset = (AlpacaDataset(enc_extended, split=s) for s in ("train", "val"))
     train_loader = DataLoader(train_dataset, shuffle=True,  batch_size=8, collate_fn=collate_fn)
-    val_loader   = DataLoader(val_dataset,   shuffle=False, batch_size=8, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset,   shuffle=False, batch_size=8, collate_fn=collate_fn)
+
+    train_iter = iter(train_loader)
+    val_iter = iter(val_loader)
 
     #reuse train logic from train.py
-    max_steps = len(train_dataset // 8) # dataloader bs
-    for epoch in range(epochs):
-        for step in range(max_steps):
-            t0 = time.time()
-            last_step = step == max_steps - 1
-            loss_accum = 0.0
-            optimizer.zero_grad()
-            for micro_step in range(grad_accum_steps):
-                x, y = next(iter(train_loader))
-                x, y = x.to(device), y.to(device)
-                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    logits, loss = model(x, y)
-                loss /= grad_accum_steps
-                loss_accum += loss.detach()
-                if ddp:
-                    model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
-                loss.backward()
+    max_steps = len(train_dataset) // 8 * epochs  # dataloader bs
+    eval_every = max_steps // 15
+    for step in range(max_steps):
+        t0 = time.time()
+        last_step = step == max_steps - 1
+
+        if step > 0 and (step % eval_every == 0 or last_step):
+            model.eval()
+            with torch.no_grad():
+                val_loss_accum = 0.0
+                val_loss_steps = 20
+                for _ in range(val_loss_steps):
+                    try:
+                        x, y = next(val_iter)
+                    except StopIteration:
+                        train_iter = iter(val_loader)
+                        x, y = next(val_iter)
+                    x, y = x.to(device), y.to(device)
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                        logits, loss = model(x, y)
+                    loss = loss / val_loss_steps
+                    val_loss_accum += loss.detach()
             if ddp:
-                dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            lr = get_lr(step, max_lr, min_lr, warmup_steps, max_steps)
-            for param_group in optimizer.param_groups:
-                param_group["lr"] = lr
-            optimizer.step()
-            t1 = time.time()
-            dt = t1 - t0  # time difference in seconds
-            tokens_processed = (
-                train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
-            )
-            tokens_per_sec = tokens_processed / dt
+                dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
             if master_process:
-                print(
-                    f"step {step:5d} | loss: {loss_accum.item():.6f} |"
-                    f", lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms",
-                    f"| tok/sec: {tokens_per_sec:.2f}",
-                )
-                # with open(log_file, "a") as f:
-                #     f.write(f"{step} train {loss_accum.item():.6f}\n")
+                print(f"validation loss: {val_loss_accum.item():.4f}")
+                with open(log_file, "a") as f:
+                    f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+                if step > 0 and (step % 5000 == 0 or last_step):
+                    checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                    checkpoint = {
+                        "model": raw_model.state_dict(),
+                        "config": raw_model.config,
+                    }
+                    torch.save(checkpoint, checkpoint_path)
+
+        model.train()
+        loss_accum = 0.0
+        optimizer.zero_grad()
+        for micro_step in range(grad_accum_steps):
+            try:
+                x, y = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_loader)
+                x, y = next(train_iter)
+            x, y = x.to(device), y.to(device)
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                logits, loss = model(x, y)
+            loss /= grad_accum_steps
+            loss_accum += loss.detach()
+            if ddp:
+                model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
+            loss.backward()
+        if ddp:
+            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        lr = get_lr(step, max_lr, min_lr, warmup_steps, max_steps)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
+        optimizer.step()
+        t1 = time.time()
+        dt = t1 - t0  # time difference in seconds
+        if master_process:
+            print(
+                f"step {step:5d} | loss: {loss_accum.item():.6f} |"
+                f", lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms",
+            )
+            # with open(log_file, "a") as f:
+            #     f.write(f"{step} train {loss_accum.item():.6f}\n")
