@@ -1,6 +1,7 @@
 from datasets import load_dataset
 import tiktoken
 import time
+import os
 import random
 import torch
 import torch.distributed as dist
@@ -110,6 +111,12 @@ if __name__ == "__main__":
     train_iter = iter(train_loader)
     val_iter = iter(val_loader)
 
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    log_dir = os.path.join(BASE_DIR, ".", "log")
+    log_dir = os.path.abspath(log_dir)
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "sft_finetune.log")
+
     #reuse train logic from train.py
     max_steps = len(train_dataset) // 8 * epochs  # dataloader bs
     eval_every = max_steps // 15
@@ -139,7 +146,7 @@ if __name__ == "__main__":
                 print(f"validation loss: {val_loss_accum.item():.4f}")
                 with open(log_file, "a") as f:
                     f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-                if step > 0 and (step % 5000 == 0 or last_step):
+                if last_step:
                     checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                     checkpoint = {
                         "model": raw_model.state_dict(),
@@ -178,5 +185,5 @@ if __name__ == "__main__":
                 f"step {step:5d} | loss: {loss_accum.item():.6f} |"
                 f", lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms",
             )
-            # with open(log_file, "a") as f:
-            #     f.write(f"{step} train {loss_accum.item():.6f}\n")
+            with open(log_file, "a") as f:
+                f.write(f"{step} train {loss_accum.item():.6f}\n")
