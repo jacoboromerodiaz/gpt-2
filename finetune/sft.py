@@ -38,7 +38,7 @@ class AlpacaDataset(Dataset):
     def __getitem__(self, idx):
         tokens = self.examples[idx]
         x = tokens[:-1]
-        y = tokens[1:]
+        y = tokens[1:].clone()
 
         assistant_start_seq = torch.tensor(
             [50257] + enc_extended.encode("assistant\n"), dtype=torch.long
@@ -63,7 +63,7 @@ def collate_fn(batch):
 
     max_len = max(x.size(0) for x in xs)
 
-    xs_pad = torch.zeros(len(xs), max_len, dtype=torch.long)
+    xs_pad = torch.full((len(xs), max_len), fill_value=50256, dtype=torch.long)  # <|endoftext|>
     ys_pad = torch.full((len(ys), max_len), fill_value=-100, dtype=torch.long)
 
     for i, (x, y) in enumerate(zip(xs, ys)):
@@ -120,8 +120,8 @@ if __name__ == "__main__":
     raw_model = unwrap_model(model)
 
     train_dataset, val_dataset = (AlpacaDataset(enc_extended, split=s) for s in ("train", "val"))
-    train_loader = DataLoader(train_dataset, shuffle=True,  batch_size=8, collate_fn=collate_fn)
-    val_loader = DataLoader(val_dataset,   shuffle=False, batch_size=8, collate_fn=collate_fn)
+    train_loader = DataLoader(train_dataset, shuffle=True, batch_size=8, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=8, collate_fn=collate_fn)
 
     train_iter = iter(train_loader)
     val_iter = iter(val_loader)
@@ -181,6 +181,13 @@ if __name__ == "__main__":
             x, y = x.to(device), y.to(device)
             with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 logits, loss = model(x, y)
+
+            if torch.isnan(loss):
+                print(f"NaN loss detected at step {step}, skipping batch")
+                print(x, y)
+                optimizer.zero_grad()
+                loss_accum = torch.tensor(float('nan'))
+                continue
             loss /= grad_accum_steps
             loss_accum += loss.detach()
             if ddp:
