@@ -8,10 +8,10 @@ from torch.distributed import init_process_group, destroy_process_group
 
 from types import SimpleNamespace
 
-from data import DataLoader
-from model import GPT, GPTConfig
-from utils import unwrap_model
-from hellaswag import iterate_examples, render_example, get_most_likely_row
+from .data import DataLoader
+from .model import GPT, GPTConfig
+from .utils import unwrap_model
+from .hellaswag import iterate_examples, render_example, get_most_likely_row
 
 # hardcoded from gpt-3 paper
 max_lr = 6e-4
