@@ -13,13 +13,8 @@ from .model import GPT, GPTConfig
 from .utils import unwrap_model
 from .hellaswag import iterate_examples, render_example, get_most_likely_row
 
-# hardcoded from gpt-3 paper
-max_lr = 6e-4
-min_lr = max_lr * 0.1
-weight_decay = 0.1
-warmup_steps = 715
-max_steps = 19073
-
+import sys
+sys.path.insert(0, os.path.dirname(__file__))
 
 def setup_device():
     ddp = int(os.environ.get("RANK", -1)) != -1
@@ -76,7 +71,7 @@ def load_checkpoint(path, device, device_type):
     return model, optimizer, checkpoint
 
 
-def get_lr(step):
+def get_lr(step, max_lr, min_lr, warmup_steps, max_steps):
     if step < warmup_steps:
         return max_lr * (step + 1) / warmup_steps
     if step > max_steps:
@@ -86,82 +81,87 @@ def get_lr(step):
     cos_coeff = 0.5 * (1.0 + math.cos(math.pi * decay))
     return min_lr + cos_coeff * (max_lr - min_lr)
 
-
-ctx = setup_device()
-
-ddp = ctx.ddp
-ddp_rank = ctx.ddp_rank
-ddp_local_rank = ctx.ddp_local_rank
-ddp_world_size = ctx.ddp_world_size
-device = ctx.device
-device_type = ctx.device_type
-master_process = ctx.master_process
-
-torch.manual_seed(333)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(333)
-torch.set_float32_matmul_precision("high")
-
-sim_batch_size = 524288
-B, T = 16, 1024
-assert (
-    sim_batch_size % (B * T * ddp_world_size) == 0
-), "sim_batch_size must be divisible by B * T * ddp_world_size"
-grad_accum_steps = sim_batch_size // (B * T * ddp_world_size)
-
-train_loader = DataLoader(
-    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train"
-)
-val_loader = DataLoader(
-    B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val"
-)
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-log_dir = os.path.join(BASE_DIR, "..", "log")
-log_dir = os.path.abspath(log_dir)  # normaliza el path
-os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, "train.log")
-
-resume_training = True
-if resume_training:
-    checkpoint_files = sorted(
-        f for f in os.listdir(log_dir) if f.startswith("model_") and f.endswith(".pt")
-    )
-    assert checkpoint_files, "no checkpoints found"
-
-    model, optimizer, checkpoint = load_checkpoint(
-        os.path.join(log_dir, checkpoint_files[-1]), device, device_type
-    )
-    model.load_state_dict(checkpoint["model"])
-    train_loader.set(checkpoint["train_loader"])
-    current_step = checkpoint["step"] + 1
-
-    if master_process:
-        print(
-            f"resuming training from step {current_step}",
-            f"with val_loss={checkpoint['val_loss']:.4f}",
-        )
-else:
-    model = GPT(GPTConfig(vocab_size=50304))
-    model.to(device)
-    optimizer = model.configure_optimizer(
-        weight_decay=weight_decay, learning_rate=max_lr, device_type=device_type
-    )
-    current_step = 0
-
-    if master_process:
-        open(log_file, "w").close()
-
-model = torch.compile(model)
-raw_model = unwrap_model(model)
-
-if ddp:
-    model = torch.nn.parallel.DistributedDataParallel(
-        model, device_ids=[ddp_local_rank]
-    )
-
-
 def main():
+    # hardcoded from gpt-3 paper
+    max_lr = 6e-4
+    min_lr = max_lr * 0.1
+    weight_decay = 0.1
+    warmup_steps = 715
+    max_steps = 19073
+
+    ctx = setup_device()
+
+    ddp = ctx.ddp
+    ddp_rank = ctx.ddp_rank
+    ddp_local_rank = ctx.ddp_local_rank
+    ddp_world_size = ctx.ddp_world_size
+    device = ctx.device
+    device_type = ctx.device_type
+    master_process = ctx.master_process
+
+    torch.manual_seed(333)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(333)
+    torch.set_float32_matmul_precision("high")
+
+    sim_batch_size = 524288
+    B, T = 16, 1024
+    assert (
+        sim_batch_size % (B * T * ddp_world_size) == 0
+    ), "sim_batch_size must be divisible by B * T * ddp_world_size"
+    grad_accum_steps = sim_batch_size // (B * T * ddp_world_size)
+
+    train_loader = DataLoader(
+        B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train"
+    )
+    val_loader = DataLoader(
+        B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val"
+    )
+
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    log_dir = os.path.join(BASE_DIR, "..", "log")
+    log_dir = os.path.abspath(log_dir)  # normaliza el path
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "train.log")
+
+    resume_training = True
+    if resume_training:
+        checkpoint_files = sorted(
+            f for f in os.listdir(log_dir) if f.startswith("model_") and f.endswith(".pt")
+        )
+        assert checkpoint_files, "no checkpoints found"
+
+        model, optimizer, checkpoint = load_checkpoint(
+            os.path.join(log_dir, checkpoint_files[-1]), device, device_type
+        )
+        model.load_state_dict(checkpoint["model"])
+        train_loader.set(checkpoint["train_loader"])
+        current_step = checkpoint["step"] + 1
+
+        if master_process:
+            print(
+                f"resuming training from step {current_step}",
+                f"with val_loss={checkpoint['val_loss']:.4f}",
+            )
+    else:
+        model = GPT(GPTConfig(vocab_size=50304))
+        model.to(device)
+        optimizer = model.configure_optimizer(
+            weight_decay=weight_decay, learning_rate=max_lr, device_type=device_type
+        )
+        current_step = 0
+
+        if master_process:
+            open(log_file, "w").close()
+
+    model = torch.compile(model)
+    raw_model = unwrap_model(model)
+
+    if ddp:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[ddp_local_rank]
+        )
+
     for step in range(current_step, max_steps):
         t0 = time.time()
         last_step = step == max_steps - 1
