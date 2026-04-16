@@ -57,18 +57,21 @@ def setup_device():
     )
 
 
-def load_checkpoint(path, device, device_type):
-    checkpoint = torch.load(path, map_location=device, weights_only=False)
+def load_checkpoint(path, device, weights_only=False):
+    torch.serialization.add_safe_globals([(GPTConfig, "model.GPTConfig")])
+    checkpoint = torch.load(path, map_location=device, weights_only=weights_only)
     model = GPT(checkpoint["config"])
     model.to(device)
     model.load_state_dict(checkpoint["model"])
+    return model, checkpoint
 
+def load_optimizer_checkpoint(model, checkpoint, device_type):
     opt_state = checkpoint["optimizer"]
     lr = opt_state["param_groups"][0]["lr"]
     wd = opt_state["param_groups"][0]["weight_decay"]
     optimizer = model.configure_optimizer(weight_decay=wd, lr=lr, device=device_type)
     optimizer.load_state_dict(opt_state)
-    return model, optimizer, checkpoint
+    return optimizer
 
 
 def get_lr(step, max_lr, min_lr, warmup_steps, max_steps):
@@ -131,10 +134,10 @@ def main():
         )
         assert checkpoint_files, "no checkpoints found"
 
-        model, optimizer, checkpoint = load_checkpoint(
-            os.path.join(log_dir, checkpoint_files[-1]), device, device_type
+        model, checkpoint = load_checkpoint(
+            os.path.join(log_dir, checkpoint_files[-1]), device
         )
-        model.load_state_dict(checkpoint["model"])
+        optimizer = load_optimizer_checkpoint(model, checkpoint, device_type)
         train_loader.set(checkpoint["train_loader"])
         current_step = checkpoint["step"] + 1
 
