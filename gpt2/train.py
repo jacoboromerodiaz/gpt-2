@@ -14,7 +14,9 @@ from .utils import unwrap_model
 from .hellaswag import iterate_examples, render_example, get_most_likely_row
 
 import sys
+
 sys.path.insert(0, os.path.dirname(__file__))
+
 
 def setup_device():
     ddp = int(os.environ.get("RANK", -1)) != -1
@@ -65,6 +67,7 @@ def load_checkpoint(path, device, weights_only=False):
     model.load_state_dict(checkpoint["model"])
     return model, checkpoint
 
+
 def load_optimizer_checkpoint(model, checkpoint, device_type):
     opt_state = checkpoint["optimizer"]
     lr = opt_state["param_groups"][0]["lr"]
@@ -83,6 +86,7 @@ def get_lr(step, max_lr, min_lr, warmup_steps, max_steps):
     assert 0 <= decay <= 1
     cos_coeff = 0.5 * (1.0 + math.cos(math.pi * decay))
     return min_lr + cos_coeff * (max_lr - min_lr)
+
 
 def main():
     # hardcoded from gpt-3 paper
@@ -122,15 +126,17 @@ def main():
     )
 
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    log_dir = os.path.join(BASE_DIR, "..", "log")
-    log_dir = os.path.abspath(log_dir)  # normaliza el path
+    log_dir = os.path.join(BASE_DIR, ".", "log")
+    log_dir = os.path.abspath(log_dir)
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "train.log")
 
     resume_training = True
     if resume_training:
         checkpoint_files = sorted(
-            f for f in os.listdir(log_dir) if f.startswith("model_") and f.endswith(".pt")
+            f
+            for f in os.listdir(log_dir)
+            if f.startswith("model_") and f.endswith(".pt")
         )
         assert checkpoint_files, "no checkpoints found"
 
@@ -255,7 +261,7 @@ def main():
         if ddp:
             dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        lr = get_lr(step)
+        lr = get_lr(step, max_lr, min_lr, warmup_steps, max_steps)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
         optimizer.step()
