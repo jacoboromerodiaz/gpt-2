@@ -103,10 +103,9 @@ if __name__ == "__main__":
     master_process = ctx.master_process
 
     grad_accum_steps = 1
-    max_lr = 1e-4
-    min_lr = 1e-5
+    max_lr = 1e-5
+    min_lr = 1e-6
     warmup_steps = 700
-    ft_lr = 1e-6
     weight_decay = 0.1
 
     epochs = 5
@@ -114,7 +113,7 @@ if __name__ == "__main__":
     checkpoint_file = "/Users/jacoboromerodiaz/Projects/gpt-2/gpt2/log/model_10000.pt"
 
     model, checkpoint = load_checkpoint(checkpoint_file, device, weights_only=True)
-    optimizer = model.configure_optimizer(weight_decay=weight_decay, lr=ft_lr, device=device_type)
+    optimizer = model.configure_optimizer(weight_decay=weight_decay, lr=max_lr, device=device_type)
 
     model = torch.compile(model)
     raw_model = unwrap_model(model)
