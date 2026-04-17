@@ -1,8 +1,10 @@
-from datasets import load_dataset
-import tiktoken
 import time
 import os
 import random
+import tiktoken
+
+from datasets import load_dataset
+
 import torch
 import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
@@ -10,8 +12,12 @@ from torch.utils.data import Dataset, DataLoader
 from gpt2.train import load_checkpoint, setup_device, get_lr
 from gpt2.utils import unwrap_model
 
+
 class AlpacaDataset(Dataset):
-    def __init__(self, enc, max_length=1024, split="train", val_ratio=0.1, seed=42):
+    def __init__(
+        self, enc_extended, max_length=1024, split="train", val_ratio=0.1, seed=42
+    ):
+        self.enc_extended = enc_extended
         ds = load_dataset("yahma/alpaca-cleaned", split="train")
         all_examples = []
         for row in ds:
@@ -20,7 +26,9 @@ class AlpacaDataset(Dataset):
                 + (f"\n{row['input']}" if row["input"] else "")
                 + f"<|im_end|>\n<|im_start|>assistant\n{row['output']}<|im_end|>"
             )
-            tokens = enc.encode(text, allowed_special={"<|im_start|>", "<|im_end|>"})
+            tokens = enc_extended.encode(
+                text, allowed_special={"<|im_start|>", "<|im_end|>"}
+            )
             if len(tokens) <= max_length:
                 all_examples.append(torch.tensor(tokens, dtype=torch.long))
 
@@ -41,7 +49,7 @@ class AlpacaDataset(Dataset):
         y = tokens[1:].clone()
 
         assistant_start_seq = torch.tensor(
-            [50257] + enc_extended.encode("assistant\n"), dtype=torch.long
+            [50257] + self.enc_extended.encode("assistant\n"), dtype=torch.long
         )
         mask_until = find_subsequence(y, assistant_start_seq)
         if mask_until is None:
@@ -51,19 +59,23 @@ class AlpacaDataset(Dataset):
             y[:mask_until] = -100
         return x, y
 
+
 def find_subsequence(tensor, subseq):
     n, m = tensor.size(0), subseq.size(0)
     for i in range(n - m + 1):
-        if torch.all(tensor[i:i+m] == subseq):
+        if torch.all(tensor[i : i + m] == subseq):
             return i + m
     return None
+
 
 def collate_fn(batch):
     xs, ys = zip(*batch)
 
     max_len = max(x.size(0) for x in xs)
 
-    xs_pad = torch.full((len(xs), max_len), fill_value=50256, dtype=torch.long)  # <|endoftext|>
+    xs_pad = torch.full(
+        (len(xs), max_len), fill_value=50256, dtype=torch.long
+    )  # <|endoftext|>
     ys_pad = torch.full((len(ys), max_len), fill_value=-100, dtype=torch.long)
 
     for i, (x, y) in enumerate(zip(xs, ys)):
@@ -72,13 +84,14 @@ def collate_fn(batch):
 
     return xs_pad, ys_pad
 
+
 def extend_encoder(enc):
     enc_extended = tiktoken.Encoding(
         name="gpt2_chat",
-        pat_str=enc._pat_str,
-        mergeable_ranks=enc._mergeable_ranks,
+        pat_str=enc._pat_str,  # pylint: disable=protected-access
+        mergeable_ranks=enc._mergeable_ranks,  # pylint: disable=protected-access
         special_tokens={
-            **enc._special_tokens,
+            **enc._special_tokens,  # pylint: disable=protected-access
             "<|im_start|>": 50257,
             "<|im_end|>": 50258,
         },
@@ -88,8 +101,6 @@ def extend_encoder(enc):
 
 if __name__ == "__main__":
     enc = tiktoken.get_encoding("gpt2")
-    device = "mps"
-    device_type = "cpu"
     enc_extended = extend_encoder(enc)
 
     ctx = setup_device()
@@ -113,14 +124,22 @@ if __name__ == "__main__":
     checkpoint_file = "/workspace/gpt-2/gpt2/log/model_19072.pt"
 
     model, checkpoint = load_checkpoint(checkpoint_file, device, weights_only=True)
-    optimizer = model.configure_optimizer(weight_decay=weight_decay, lr=max_lr, device=device_type)
+    optimizer = model.configure_optimizer(
+        weight_decay=weight_decay, lr=max_lr, device=device_type
+    )
 
     model = torch.compile(model)
     raw_model = unwrap_model(model)
 
-    train_dataset, val_dataset = (AlpacaDataset(enc_extended, split=s) for s in ("train", "val"))
-    train_loader = DataLoader(train_dataset, shuffle=True, batch_size=8, collate_fn=collate_fn)
-    val_loader = DataLoader(val_dataset, shuffle=False, batch_size=8, collate_fn=collate_fn)
+    train_dataset, val_dataset = (
+        AlpacaDataset(enc_extended, split=s) for s in ("train", "val")
+    )
+    train_loader = DataLoader(
+        train_dataset, shuffle=True, batch_size=8, collate_fn=collate_fn
+    )
+    val_loader = DataLoader(
+        val_dataset, shuffle=False, batch_size=8, collate_fn=collate_fn
+    )
 
     train_iter = iter(train_loader)
     val_iter = iter(val_loader)
@@ -131,7 +150,7 @@ if __name__ == "__main__":
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "sft_finetune.log")
 
-    #reuse train logic from train.py
+    # reuse train logic from train.py
     max_steps = len(train_dataset) // 8 * epochs  # dataloader bs
     eval_every = max_steps // 3
     for step in range(max_steps):
@@ -158,7 +177,7 @@ if __name__ == "__main__":
                 dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
             if master_process:
                 print(f"validation loss: {val_loss_accum.item():.4f}")
-                with open(log_file, "a") as f:
+                with open(log_file, "a", encoding="utf-8") as f:
                     f.write(f"{step} val {val_loss_accum.item():.4f}\n")
                 if step % eval_every == 0 or last_step:
                     checkpoint_path = os.path.join(log_dir, f"ft_model_{step:05d}.pt")
@@ -185,7 +204,7 @@ if __name__ == "__main__":
                 print(f"NaN loss detected at step {step}, skipping batch")
                 print(x, y)
                 optimizer.zero_grad()
-                loss_accum = torch.tensor(float('nan'))
+                loss_accum = torch.tensor(float("nan"))
                 continue
             loss /= grad_accum_steps
             loss_accum += loss.detach()
@@ -206,5 +225,5 @@ if __name__ == "__main__":
                 f"step {step:5d} | loss: {loss_accum.item():.6f} |"
                 f", lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms",
             )
-            with open(log_file, "a") as f:
+            with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"{step} train {loss_accum.item():.6f}\n")
