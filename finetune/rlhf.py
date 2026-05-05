@@ -224,7 +224,7 @@ if __name__ == "__main__":
         AutoModelForSequenceClassification.from_pretrained(
             RM_NAME, torch_dtype=torch.bfloat16
         )
-        .to("cpu")  # .to(ctx.device)
+        .to(ctx.device)
         .eval()
     )
 
