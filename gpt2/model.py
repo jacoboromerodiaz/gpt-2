@@ -2,7 +2,7 @@ import inspect
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.nn import functional as F
 
 
@@ -61,7 +61,9 @@ class FlashCausalSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        y = F.scaled_dot_product_attention(  # pylint: disable=not-callable
+            q, k, v, is_causal=True
+        )
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.c_proj(y)
         return y
@@ -190,3 +192,22 @@ class GPT(nn.Module):
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
+
+    @torch.no_grad()
+    def generate(self, prompt_ids, max_new_tokens, temperature=1.0, top_k=50):
+        generated = prompt_ids.clone()
+        for _ in range(max_new_tokens):
+            idx_cond = generated[
+                :, -self.config.block_size :
+            ]  # context window guard, drop oldest tokens
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :] / temperature
+            if top_k is not None:
+                logits[
+                    logits
+                    < torch.topk(logits, min(top_k, logits.size(-1))).values[:, [-1]]
+                ] = float("-inf")
+            probs = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            generated = torch.cat([generated, next_token], dim=1)
+        return generated
