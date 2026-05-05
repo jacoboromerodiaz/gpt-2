@@ -8,5 +8,7 @@ disable =
     missing-function-docstring,
     invalid-name,
     too-many-arguments,
+    too-many-locals,
+    use-dict-literal,
     too-many-positional-arguments,
     redefined-outer-name
