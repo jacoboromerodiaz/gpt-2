@@ -60,7 +60,7 @@ def setup_device():
 
 
 def load_checkpoint(path, device, weights_only=False):
-    torch.serialization.add_safe_globals([(GPTConfig, "model.GPTConfig")])
+    torch.serialization.add_safe_globals([GPTConfig])
     checkpoint = torch.load(path, map_location=device, weights_only=weights_only)
     model = GPT(checkpoint["config"])
     model.to(device)
