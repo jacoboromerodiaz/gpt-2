@@ -1,88 +1,14 @@
 import time
 import os
-import random
 import tiktoken
-
-from datasets import load_dataset
 
 import torch
 import torch.distributed as dist
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 
 from gpt2.train import load_checkpoint, setup_device, get_lr
 from gpt2.utils import unwrap_model
-
-
-class AlpacaDataset(Dataset):
-    def __init__(
-        self, enc_extended, max_length=1024, split="train", val_ratio=0.1, seed=42
-    ):
-        self.enc_extended = enc_extended
-        ds = load_dataset("yahma/alpaca-cleaned", split="train")
-        all_examples = []
-        for row in ds:
-            text = (
-                f"<|im_start|>user\n{row['instruction']}"
-                + (f"\n{row['input']}" if row["input"] else "")
-                + f"<|im_end|>\n<|im_start|>assistant\n{row['output']}<|im_end|>"
-            )
-            tokens = enc_extended.encode(
-                text, allowed_special={"<|im_start|>", "<|im_end|>"}
-            )
-            if len(tokens) <= max_length:
-                all_examples.append(torch.tensor(tokens, dtype=torch.long))
-
-        rng = random.Random(seed)
-        rng.shuffle(all_examples)
-        n_val = int(len(all_examples) * val_ratio)
-        if split == "val":
-            self.examples = all_examples[:n_val]
-        else:
-            self.examples = all_examples[n_val:]
-
-    def __len__(self):
-        return len(self.examples)
-
-    def __getitem__(self, idx):
-        tokens = self.examples[idx]
-        x = tokens[:-1]
-        y = tokens[1:].clone()
-
-        assistant_start_seq = torch.tensor(
-            [50257] + self.enc_extended.encode("assistant\n"), dtype=torch.long
-        )
-        mask_until = find_subsequence(y, assistant_start_seq)
-        if mask_until is None:
-            # ejemplo malformado, enmascarar todo
-            y[:] = -100
-        else:
-            y[:mask_until] = -100
-        return x, y
-
-
-def find_subsequence(tensor, subseq):
-    n, m = tensor.size(0), subseq.size(0)
-    for i in range(n - m + 1):
-        if torch.all(tensor[i : i + m] == subseq):
-            return i + m
-    return None
-
-
-def collate_fn(batch):
-    xs, ys = zip(*batch)
-
-    max_len = max(x.size(0) for x in xs)
-
-    xs_pad = torch.full(
-        (len(xs), max_len), fill_value=50256, dtype=torch.long
-    )  # <|endoftext|>
-    ys_pad = torch.full((len(ys), max_len), fill_value=-100, dtype=torch.long)
-
-    for i, (x, y) in enumerate(zip(xs, ys)):
-        xs_pad[i, : x.size(0)] = x
-        ys_pad[i, : y.size(0)] = y
-
-    return xs_pad, ys_pad
+from finetune.data import AlpacaDataset, DollyDataset, collate_fn
 
 
 def extend_encoder(enc):
@@ -114,8 +40,8 @@ if __name__ == "__main__":
     master_process = ctx.master_process
 
     grad_accum_steps = 1
-    max_lr = 3e-5
-    min_lr = 3e-6
+    max_lr = 1e-5
+    min_lr = 1e-6
     warmup_steps = 700
     weight_decay = 0.1
 
@@ -131,8 +57,17 @@ if __name__ == "__main__":
     model = torch.compile(model)
     raw_model = unwrap_model(model)
 
-    train_dataset, val_dataset = (
-        AlpacaDataset(enc_extended, split=s) for s in ("train", "val")
+    train_dataset = ConcatDataset(
+        [
+            AlpacaDataset(enc_extended, split="train"),
+            DollyDataset(enc_extended, split="train"),
+        ]
+    )
+    val_dataset = ConcatDataset(
+        [
+            AlpacaDataset(enc_extended, split="val"),
+            DollyDataset(enc_extended, split="val"),
+        ]
     )
     train_loader = DataLoader(
         train_dataset, shuffle=True, batch_size=8, collate_fn=collate_fn
