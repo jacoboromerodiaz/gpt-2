@@ -39,13 +39,13 @@ if __name__ == "__main__":
     device_type = ctx.device_type
     master_process = ctx.master_process
 
-    grad_accum_steps = 1
+    grad_accum_steps = 4
     max_lr = 1e-5
     min_lr = 1e-6
     warmup_steps = 700
     weight_decay = 0.1
 
-    epochs = 5
+    epochs = 3
 
     checkpoint_file = "/workspace/gpt-2/gpt2/log/model_19072.pt"
 
