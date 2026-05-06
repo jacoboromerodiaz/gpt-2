@@ -39,6 +39,7 @@ if __name__ == "__main__":
     device_type = ctx.device_type
     master_process = ctx.master_process
 
+    batch_size = 8
     grad_accum_steps = 4
     max_lr = 1e-5
     min_lr = 1e-6
@@ -47,9 +48,9 @@ if __name__ == "__main__":
 
     epochs = 3
 
-    checkpoint_file = "/workspace/gpt-2/gpt2/log/model_19072.pt"
+    checkpoint_file = "/workspace/gpt-2/finetune/log/model.pt"
 
-    model, checkpoint = load_checkpoint(checkpoint_file, device, weights_only=True)
+    model, checkpoint = load_checkpoint(checkpoint_file, device, weights_only=False)
     optimizer = model.configure_optimizer(
         weight_decay=weight_decay, lr=max_lr, device=device_type
     )
@@ -70,10 +71,10 @@ if __name__ == "__main__":
         ]
     )
     train_loader = DataLoader(
-        train_dataset, shuffle=True, batch_size=8, collate_fn=collate_fn
+        train_dataset, shuffle=True, batch_size=batch_size, collate_fn=collate_fn
     )
     val_loader = DataLoader(
-        val_dataset, shuffle=False, batch_size=8, collate_fn=collate_fn
+        val_dataset, shuffle=False, batch_size=batch_size, collate_fn=collate_fn
     )
 
     train_iter = iter(train_loader)
@@ -86,7 +87,7 @@ if __name__ == "__main__":
     log_file = os.path.join(log_dir, "sft_finetune.log")
 
     # reuse train logic from train.py
-    max_steps = len(train_dataset) // 8 * epochs  # dataloader bs
+    max_steps = len(train_dataset) // (batch_size * grad_accum_steps) * epochs
     eval_every = max_steps // 3
     for step in range(max_steps):
         t0 = time.time()
@@ -115,7 +116,7 @@ if __name__ == "__main__":
                 with open(log_file, "a", encoding="utf-8") as f:
                     f.write(f"{step} val {val_loss_accum.item():.4f}\n")
                 if step % eval_every == 0 or last_step:
-                    checkpoint_path = os.path.join(log_dir, f"ft_model_{step:05d}.pt")
+                    checkpoint_path = os.path.join(log_dir, f"sft_model_{step:05d}.pt")
                     checkpoint = {
                         "model": raw_model.state_dict(),
                         "config": raw_model.config,
