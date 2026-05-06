@@ -1,5 +1,4 @@
 import os
-import random
 import time
 
 import tiktoken
@@ -7,67 +6,22 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-
-from datasets import load_dataset
 
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from gpt2.train import get_lr, load_checkpoint, setup_device
 from gpt2.utils import unwrap_model
 from finetune.sft import extend_encoder
-
-IM_START = 50257
-IM_END = 50258
-EOS = 50256
+from finetune.data import AlpacaPromptDataset, collate_prompts, IM_END, EOS
 
 RM_NAME = "OpenAssistant/reward-model-deberta-v3-base"
 
 # Notes
 # - rm model imported, tokenizer trick
 # - kl divergence uses k3
-
-
-class AlpacaPromptDataset(Dataset):
-    """Only the user prompt tokens."""
-
-    def __init__(
-        self, enc_extended, max_prompt_length=256, split="train", val_ratio=0.1, seed=42
-    ):
-        ds = load_dataset("yahma/alpaca-cleaned", split="train")
-        all_prompts = []
-        for row in ds:
-            text = (
-                f"<|im_start|>user\n{row['instruction']}"
-                + (f"\n{row['input']}" if row["input"] else "")
-                + "<|im_end|>\n<|im_start|>assistant\n"
-            )
-            tokens = enc_extended.encode(
-                text, allowed_special={"<|im_start|>", "<|im_end|>"}
-            )
-            if len(tokens) <= max_prompt_length:
-                all_prompts.append(torch.tensor(tokens, dtype=torch.long))
-
-        rng = random.Random(seed)
-        rng.shuffle(all_prompts)
-        n_val = int(len(all_prompts) * val_ratio)
-        self.prompts = all_prompts[:n_val] if split == "val" else all_prompts[n_val:]
-
-    def __len__(self):
-        return len(self.prompts)
-
-    def __getitem__(self, idx):
-        return self.prompts[idx]
-
-
-def collate_prompts(batch):
-    """Left-pad prompts"""
-    max_len = max(p.size(0) for p in batch)
-    padded = torch.full((len(batch), max_len), fill_value=EOS, dtype=torch.long)
-    for i, p in enumerate(batch):
-        padded[i, max_len - p.size(0) :] = p
-    return padded
+# - reward hacking outputing user prompt
 
 
 def build_action_mask(sequence_ids, prompt_len, stop_tokens=(IM_END, EOS)):
@@ -151,7 +105,7 @@ def compute_rewards(sequence_ids, prompt_len, enc_extended, rm_model, rm_tokeniz
     return scores.float()
 
 
-def grpo_advantages(rewards, group_size, eps=1e-4):
+def grpo_advantages(rewards, group_size, eps=1e-4): # TODO change here
     """
     rewards : (B, G)
     Returns : (B * G,)
@@ -188,13 +142,13 @@ if __name__ == "__main__":
     ctx = setup_device()
     ddp = ctx.ddp
 
-    max_lr = 1e-5
-    min_lr = 1e-6
+    max_lr = 5e-6
+    min_lr = 5e-7
     warmup_steps = 100
     weight_decay = 0.1
     clip_eps = 0.2
-    beta_kl = 0.04  # KL coefficient
-    inner_update_steps = 4  # PPO-style updates per rollout
+    beta_kl = 0.2  # KL coefficient
+    inner_update_steps = 2  # PPO-style updates per rollout
     group_size = 8  # completions per prompt
     max_new_tokens = 128
     temperature = 0.8
@@ -258,7 +212,7 @@ if __name__ == "__main__":
 
     steps_per_epoch = len(train_loader)
     max_steps = steps_per_epoch * epochs
-    eval_every = max(1, max_steps // 5)
+    eval_every = max(1, max_steps // 170)
 
     model.eval()  # keep eval mode on for the whole RL run
 
@@ -279,7 +233,8 @@ if __name__ == "__main__":
 
             with torch.no_grad():
                 sequence_ids = raw_model.generate(
-                    expanded, max_new_tokens, temperature, top_k
+                    expanded, max_new_tokens, temperature, top_k,
+                    stop_tokens=(IM_END, EOS),
                 )
 
                 action_mask = build_action_mask(sequence_ids, T_p)
@@ -367,7 +322,7 @@ if __name__ == "__main__":
                         f"kl={avg_kl:.6f} reward={avg_reward:.4f}\n"
                     )
                 if (
-                    global_step % eval_every == 0 and epoch > 0
+                    global_step % eval_every == 0 and global_step > 0
                 ) or global_step == max_steps - 1:
                     ckpt_path = os.path.join(
                         log_dir, f"grpo_model_{global_step:05d}.pt"
