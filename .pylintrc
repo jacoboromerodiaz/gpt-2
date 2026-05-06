@@ -10,5 +10,6 @@ disable =
     too-many-arguments,
     too-many-locals,
     use-dict-literal,
+    too-few-public-methods,
     too-many-positional-arguments,
     redefined-outer-name
