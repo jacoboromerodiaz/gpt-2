@@ -39,6 +39,9 @@ class _SFTDataset(Dataset):
     def load(self, enc_extended, max_length):
         raise NotImplementedError
 
+    def __len__(self):
+        return len(self.examples)
+
     def __getitem__(self, idx):
         tokens = self.examples[idx]
         x = tokens[:-1]
