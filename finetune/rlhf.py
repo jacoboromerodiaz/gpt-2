@@ -105,7 +105,7 @@ def compute_rewards(sequence_ids, prompt_len, enc_extended, rm_model, rm_tokeniz
     return scores.float()
 
 
-def grpo_advantages(rewards, group_size, eps=1e-4): # TODO change here
+def grpo_advantages(rewards, group_size, eps=1e-4):
     """
     rewards : (B, G)
     Returns : (B * G,)
@@ -116,23 +116,31 @@ def grpo_advantages(rewards, group_size, eps=1e-4): # TODO change here
 
 
 def policy_gradient_loss(
-    log_probs_new, log_probs_old, advantages, action_mask, clip_eps=0.2
+    log_probs_new,
+    log_probs_old,
+    advantages,
+    action_mask,
+    clip_eps=0.2,
+    fixed_len_norm=False,
+    L_max=128,
 ):
     adv = advantages.unsqueeze(-1)  # broadcast over sequence length
     ratio = torch.exp(log_probs_new - log_probs_old.detach())
     clipped = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps)
     surrogate = torch.min(ratio * adv, clipped * adv)
     mask = action_mask.float()
-    seq_lengths = mask.sum(dim=1).clamp(min=1.0)  # per-sequence norm
-    return -((surrogate * mask).sum(dim=1) / seq_lengths).mean()
+    denom = L_max if fixed_len_norm else mask.sum(dim=1).clamp(min=1.0)
+    return -((surrogate * mask).sum(dim=1) / denom).mean()
 
 
-def kl_penalty_k3(log_probs_new, log_probs_ref, action_mask):
+def kl_penalty_k3(
+    log_probs_new, log_probs_ref, action_mask, fixed_len_norm=False, L_max=128
+):
     log_ratio = log_probs_ref - log_probs_new
     per_token_kl = torch.exp(log_ratio) - log_ratio - 1.0
     mask = action_mask.float()
-    seq_lengths = mask.sum(dim=1).clamp(min=1.0)
-    return ((per_token_kl * mask).sum(dim=1) / seq_lengths).mean()
+    denom = L_max if fixed_len_norm else mask.sum(dim=1).clamp(min=1.0)
+    return ((per_token_kl * mask).sum(dim=1) / denom).mean()
 
 
 if __name__ == "__main__":
@@ -155,6 +163,7 @@ if __name__ == "__main__":
     top_k = 50
     batch_size = 4  # n_rollouts = batch_size * group_size
     epochs = 3
+    fixed_len_norm = True  # divide by L_max instead of per-sequence length
 
     checkpoint_file = os.environ.get(
         "GRPO_CHECKPOINT",
@@ -233,7 +242,10 @@ if __name__ == "__main__":
 
             with torch.no_grad():
                 sequence_ids = raw_model.generate(
-                    expanded, max_new_tokens, temperature, top_k,
+                    expanded,
+                    max_new_tokens,
+                    temperature,
+                    top_k,
                     stop_tokens=(IM_END, EOS),
                 )
 
@@ -271,8 +283,16 @@ if __name__ == "__main__":
                     advantages,
                     action_mask,
                     clip_eps,
+                    fixed_len_norm=fixed_len_norm,
+                    L_max=max_new_tokens,
                 )
-                kl_loss = kl_penalty_k3(log_probs_new, log_probs_ref, action_mask)
+                kl_loss = kl_penalty_k3(
+                    log_probs_new,
+                    log_probs_ref,
+                    action_mask,
+                    fixed_len_norm=fixed_len_norm,
+                    L_max=max_new_tokens,
+                )
                 loss = pg_loss + beta_kl * kl_loss
 
                 if torch.isnan(loss) or torch.isinf(loss):
