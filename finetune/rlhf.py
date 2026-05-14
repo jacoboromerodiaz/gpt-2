@@ -174,8 +174,8 @@ if __name__ == "__main__":
         "/Users/jacoboromerodiaz/Projects/gpt-2/finetune/log/ft_model_29099.pt",
     )
 
-    model, _ = load_checkpoint(checkpoint_file, ctx.device, weights_only=True)
-    # model = torch.compile(model)
+    model, _ = load_checkpoint(checkpoint_file, ctx.device, weights_only=False)
+    model = torch.compile(model)
     if ddp:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[ctx.ddp_local_rank]
@@ -195,7 +195,7 @@ if __name__ == "__main__":
         .eval()
     )
 
-    ref_model, _ = load_checkpoint(checkpoint_file, ctx.device, weights_only=True)
+    ref_model, _ = load_checkpoint(checkpoint_file, ctx.device, weights_only=False)
     ref_model.eval()
     for p in ref_model.parameters():
         p.requires_grad_(False)
@@ -227,7 +227,7 @@ if __name__ == "__main__":
     max_steps = steps_per_epoch * epochs
     eval_every = max(1, max_steps // 170)
 
-    model.eval()  # keep eval mode on for the whole RL run
+    model.eval()
 
     global_step = 0
     for epoch in range(epochs):
