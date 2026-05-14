@@ -269,6 +269,15 @@ if __name__ == "__main__":
                 continue
             advantages = grpo_advantages(rewards, group_size).to(ctx.device)
 
+            if ctx.master_process and global_step % 100 == 0:
+                sample_ids = sequence_ids[0].tolist()
+                sample_text = enc_extended.decode(sample_ids).strip()
+                print(
+                    "\n[SAMPLE]",
+                    f"reward={rewards[0].item():.4f}",
+                    f"\n{sample_text}\n",
+                )
+
             losses, pg_losses, kl_losses, norms = [], [], [], []
             for _ in range(inner_update_steps):
                 optimizer.zero_grad()
