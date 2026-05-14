@@ -158,11 +158,11 @@ if __name__ == "__main__":
     min_lr = 5e-7
     warmup_steps = 100
     weight_decay = 0.1
-    clip_eps = 0.2
-    beta_kl = 0.2  # KL coefficient
+    clip_eps = 0.1
+    beta_kl = 0.4  # KL coefficient
     inner_update_steps = 2  # PPO-style updates per rollout
-    group_size = 8  # completions per prompt
-    max_new_tokens = 128
+    group_size = 16  # completions per prompt
+    max_new_tokens = 256
     temperature = 0.8
     top_k = 50
     batch_size = 4  # n_rollouts = batch_size * group_size
