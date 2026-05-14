@@ -130,7 +130,11 @@ def policy_gradient_loss(
     surrogate = torch.min(ratio * adv, clipped * adv)
     mask = action_mask.float()
     denom = L_max if fixed_len_norm else mask.sum(dim=1).clamp(min=1.0)
-    return -((surrogate * mask).sum(dim=1) / denom).mean()
+    loss = -((surrogate * mask).sum(dim=1) / denom).mean()
+    n_tokens = mask.sum().clamp(min=1)
+    clip_frac = ((ratio < 1 - clip_eps) | (ratio > 1 + clip_eps)).float()
+    clip_frac = (clip_frac * mask).sum() / n_tokens
+    return loss, clip_frac.item()
 
 
 def kl_penalty_k3(
@@ -278,7 +282,7 @@ if __name__ == "__main__":
                     f"\n{sample_text}\n",
                 )
 
-            losses, pg_losses, kl_losses, norms = [], [], [], []
+            losses, pg_losses, kl_losses, norms, clip_fracs = [], [], [], [], []
             for _ in range(inner_update_steps):
                 optimizer.zero_grad()
 
@@ -286,7 +290,7 @@ if __name__ == "__main__":
                     model, sequence_ids, action_mask, ctx.device_type
                 )
 
-                pg_loss = policy_gradient_loss(
+                pg_loss, clip_frac = policy_gradient_loss(
                     log_probs_new,
                     log_probs_old,
                     advantages,
@@ -312,6 +316,8 @@ if __name__ == "__main__":
                     optimizer.zero_grad()
                     continue
 
+                clip_fracs.append(clip_frac)
+
                 loss.backward()
                 norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
@@ -331,6 +337,7 @@ if __name__ == "__main__":
             avg_pg = sum(pg_losses) / n
             avg_kl = sum(kl_losses) / n
             avg_norm = sum(norms) / n
+            avg_clip = sum(clip_fracs) / max(len(clip_fracs), 1)
             avg_reward = rewards.mean().item()
 
             if ddp:
@@ -342,8 +349,9 @@ if __name__ == "__main__":
                 print(
                     f"step {global_step:5d} | loss: {avg_loss:.4f} "
                     f"| pg: {avg_pg:.4f} | kl: {avg_kl:.4f} "
-                    f"| reward: {avg_reward:.4f} | lr: {lr:.2e} "
-                    f"| norm: {avg_norm:.3f} | dt: {(t1 - t0) * 1000:.0f}ms"
+                    f"| clip: {avg_clip:.3f} | reward: {avg_reward:.4f} "
+                    f"| lr: {lr:.2e} | norm: {avg_norm:.3f} | "
+                    f"dt: {(t1 - t0) * 1000:.0f}ms"
                 )
                 with open(log_file, "a", encoding="utf-8") as f:
                     f.write(
