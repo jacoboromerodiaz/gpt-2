@@ -274,7 +274,7 @@ if __name__ == "__main__":
             advantages = grpo_advantages(rewards, group_size).to(ctx.device)
 
             if ctx.master_process and global_step % 100 == 0:
-                sample_ids = sequence_ids[0].tolist()
+                sample_ids = [t for t in sequence_ids[0].tolist() if t != EOS]
                 sample_text = enc_extended.decode(sample_ids).strip()
                 print(
                     "\n[SAMPLE]",
