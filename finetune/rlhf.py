@@ -46,10 +46,11 @@ def compute_sequence_log_probs(model, sequence_ids, action_mask, device_type):
     """
     with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
         logits, _ = model(sequence_ids[:, :-1])  # (B, T-1, vocab_size)
-    log_probs = F.log_softmax(logits.float(), dim=-1)
     targets = sequence_ids[:, 1:].unsqueeze(-1)  # (B, T-1, 1)
-    token_log_probs = torch.gather(log_probs, dim=-1, index=targets).squeeze(
-        -1
+    token_log_probs = (
+        torch.gather(F.log_softmax(logits, dim=-1), dim=-1, index=targets)
+        .squeeze(-1)
+        .float()
     )  # (B, T-1)
     return token_log_probs * action_mask.float()
 
@@ -251,6 +252,7 @@ if __name__ == "__main__":
                     temperature,
                     top_k,
                     stop_tokens=(IM_END, EOS),
+                    pad_token_id=EOS,
                 )
 
                 action_mask = build_action_mask(sequence_ids, T_p)
@@ -355,8 +357,11 @@ if __name__ == "__main__":
                 )
                 with open(log_file, "a", encoding="utf-8") as f:
                     f.write(
-                        f"{global_step} loss={avg_loss:.6f} pg={avg_pg:.6f} "
-                        f"kl={avg_kl:.6f} reward={avg_reward:.4f}\n"
+                        f"step {global_step:5d} | loss: {avg_loss:.4f} "
+                        f"| pg: {avg_pg:.4f} | kl: {avg_kl:.4f} "
+                        f"| clip: {avg_clip:.3f} | reward: {avg_reward:.4f} "
+                        f"| lr: {lr:.2e} | norm: {avg_norm:.3f} | "
+                        f"dt: {(t1 - t0) * 1000:.0f}ms\n"
                     )
                 if (
                     global_step % eval_every == 0 and global_step > 0
