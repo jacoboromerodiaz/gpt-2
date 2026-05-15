@@ -46,11 +46,10 @@ def compute_sequence_log_probs(model, sequence_ids, action_mask, device_type):
     """
     with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
         logits, _ = model(sequence_ids[:, :-1])  # (B, T-1, vocab_size)
+    log_probs = F.log_softmax(logits.float(), dim=-1)
     targets = sequence_ids[:, 1:].unsqueeze(-1)  # (B, T-1, 1)
-    token_log_probs = (
-        torch.gather(F.log_softmax(logits, dim=-1), dim=-1, index=targets)
-        .squeeze(-1)
-        .float()
+    token_log_probs = torch.gather(log_probs, dim=-1, index=targets).squeeze(
+        -1
     )  # (B, T-1)
     return token_log_probs * action_mask.float()
 
