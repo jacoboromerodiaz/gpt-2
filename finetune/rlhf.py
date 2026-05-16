@@ -161,7 +161,7 @@ if __name__ == "__main__":
     clip_eps = 0.1
     beta_kl = 0.4  # KL coefficient
     inner_update_steps = 2  # PPO-style updates per rollout
-    group_size = 16  # completions per prompt
+    group_size = 8  # completions per prompt
     max_new_tokens = 256
     temperature = 0.8
     top_k = 50
