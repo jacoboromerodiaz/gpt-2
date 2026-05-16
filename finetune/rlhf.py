@@ -154,18 +154,21 @@ if __name__ == "__main__":
     ctx = setup_device()
     ddp = ctx.ddp
 
-    max_lr = 5e-6
-    min_lr = 5e-7
-    warmup_steps = 100
+    max_lr = 2e-6
+    min_lr = 2e-7
+    warmup_steps = 300
     weight_decay = 0.1
     clip_eps = 0.1
     beta_kl = 0.4  # KL coefficient
     inner_update_steps = 2  # PPO-style updates per rollout
-    group_size = 8  # completions per prompt
+    group_size = 16  # completions per prompt
     max_new_tokens = 256
     temperature = 0.8
     top_k = 50
-    batch_size = 4  # n_rollouts = batch_size * group_size
+    batch_size = 1  # prompts per micro-step
+    sim_batch_size = 64
+    assert sim_batch_size % (batch_size * group_size) == 0
+    grad_accum_steps = sim_batch_size // (batch_size * group_size)
     epochs = 3
     fixed_len_norm = True  # divide by L_max instead of per-sequence length
 
@@ -225,7 +228,7 @@ if __name__ == "__main__":
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "grpo_finetune.log")
 
-    steps_per_epoch = len(train_loader)
+    steps_per_epoch = len(train_loader) // grad_accum_steps
     max_steps = steps_per_epoch * epochs
     eval_every = max(1, max_steps // 170)
 
@@ -235,107 +238,142 @@ if __name__ == "__main__":
     for epoch in range(epochs):
         if ddp:
             train_sampler.set_epoch(epoch)
-        for prompt_batch in train_loader:
-            if global_step >= max_steps:
-                break
+        train_iter = iter(train_loader)
+
+        while global_step < max_steps:
             t0 = time.time()
 
-            prompt_batch = prompt_batch.to(ctx.device)
-            B, T_p = prompt_batch.shape
+            # --- rollout phase: collect grad_accum_steps independent micro-batches ---
+            rollouts = []
+            for _ in range(grad_accum_steps):
+                try:
+                    prompt_batch = next(train_iter).to(ctx.device)
+                except StopIteration:
+                    break
+                _, T_p = prompt_batch.shape
+                expanded = prompt_batch.repeat_interleave(group_size, dim=0)
 
-            # expand each prompt G times then completions.
-            expanded = prompt_batch.repeat_interleave(group_size, dim=0)
+                with torch.no_grad():
+                    sequence_ids = raw_model.generate(
+                        expanded,
+                        max_new_tokens,
+                        temperature,
+                        top_k,
+                        stop_tokens=(IM_END, EOS),
+                        pad_token_id=EOS,
+                    )
+                    action_mask = build_action_mask(sequence_ids, T_p)
+                    log_probs_old = compute_sequence_log_probs(
+                        model, sequence_ids, action_mask, ctx.device_type
+                    )
+                    ref_model.to(ctx.device)
+                    log_probs_ref = compute_sequence_log_probs(
+                        ref_model, sequence_ids, action_mask, ctx.device_type
+                    )
+                    ref_model.to("cpu")
+                    torch.cuda.empty_cache()
+                    rewards = compute_rewards(
+                        sequence_ids, T_p, enc_extended, rm_model, rm_tokenizer
+                    )
 
-            with torch.no_grad():
-                sequence_ids = raw_model.generate(
-                    expanded,
-                    max_new_tokens,
-                    temperature,
-                    top_k,
-                    stop_tokens=(IM_END, EOS),
-                    pad_token_id=EOS,
-                )
-
-                action_mask = build_action_mask(sequence_ids, T_p)
-
-                log_probs_old = compute_sequence_log_probs(
-                    model, sequence_ids, action_mask, ctx.device_type
-                )
-                ref_model.to(ctx.device)
-                log_probs_ref = compute_sequence_log_probs(
-                    ref_model, sequence_ids, action_mask, ctx.device_type
-                )
-                ref_model.to("cpu")
-                torch.cuda.empty_cache()
-
-                rewards = compute_rewards(
-                    sequence_ids, T_p, enc_extended, rm_model, rm_tokenizer
-                )
-
-            if torch.isnan(rewards).any() or torch.isinf(rewards).any():
-                if ctx.master_process:
-                    print(f"step {global_step}: bad rewards, skipping rollout")
-                global_step += 1
-                continue
-            advantages = grpo_advantages(rewards, group_size).to(ctx.device)
-
-            if ctx.master_process and global_step % 100 == 0:
-                sample_ids = [t for t in sequence_ids[0].tolist() if t != EOS]
-                sample_text = enc_extended.decode(sample_ids).strip()
-                print(
-                    "\n[SAMPLE]",
-                    f"reward={rewards[0].item():.4f}",
-                    f"\n{sample_text}\n",
-                )
-
-            losses, pg_losses, kl_losses, norms, clip_fracs = [], [], [], [], []
-            for _ in range(inner_update_steps):
-                optimizer.zero_grad()
-
-                log_probs_new = compute_sequence_log_probs(
-                    model, sequence_ids, action_mask, ctx.device_type
-                )
-
-                pg_loss, clip_frac = policy_gradient_loss(
-                    log_probs_new,
-                    log_probs_old,
-                    advantages,
-                    action_mask,
-                    clip_eps,
-                    fixed_len_norm=fixed_len_norm,
-                    L_max=max_new_tokens,
-                )
-                kl_loss = kl_penalty_k3(
-                    log_probs_new,
-                    log_probs_ref,
-                    action_mask,
-                    fixed_len_norm=fixed_len_norm,
-                    L_max=max_new_tokens,
-                )
-                loss = pg_loss + beta_kl * kl_loss
-
-                if torch.isnan(loss) or torch.isinf(loss):
+                if torch.isnan(rewards).any() or torch.isinf(rewards).any():
                     if ctx.master_process:
                         print(
-                            f"step {global_step}: NaN/Inf loss in inner step, skipping"
+                            f"step {global_step}: bad rewards in micro-batch, skipping"
                         )
+                    continue
+
+                advantages = grpo_advantages(rewards, group_size).to(ctx.device)
+                rollouts.append(
+                    (
+                        sequence_ids,
+                        action_mask,
+                        log_probs_old,
+                        log_probs_ref,
+                        advantages,
+                        rewards,
+                    )
+                )
+
+            if not rollouts:
+                global_step += 1
+                continue
+
+            n_accum = len(rollouts)
+
+            if ctx.master_process and global_step % 100 == 0:
+                seq_ids, _, _, _, _, rews = rollouts[0]
+                sample_ids = [t for t in seq_ids[0].tolist() if t != EOS]
+                sample_text = enc_extended.decode(sample_ids).strip()
+                print(
+                    "\n[SAMPLE]", f"reward={rews[0].item():.4f}", f"\n{sample_text}\n"
+                )
+
+            # --- inner PPO updates reusing stored rollouts ---
+            losses, pg_losses, kl_losses, norms, clip_fracs = [], [], [], [], []
+            for _ in range(inner_update_steps):
+                loss_accum = pg_loss_accum = kl_loss_accum = clip_frac_accum = 0.0
+                optimizer.zero_grad()
+                had_nan = False
+
+                for micro_step, (
+                    seq_ids,
+                    act_mask,
+                    lp_old,
+                    lp_ref,
+                    adv,
+                    _,
+                ) in enumerate(rollouts):
+                    log_probs_new = compute_sequence_log_probs(
+                        model, seq_ids, act_mask, ctx.device_type
+                    )
+                    pg_loss, clip_frac = policy_gradient_loss(
+                        log_probs_new,
+                        lp_old,
+                        adv,
+                        act_mask,
+                        clip_eps,
+                        fixed_len_norm=fixed_len_norm,
+                        L_max=max_new_tokens,
+                    )
+                    kl_loss = kl_penalty_k3(
+                        log_probs_new,
+                        lp_ref,
+                        act_mask,
+                        fixed_len_norm=fixed_len_norm,
+                        L_max=max_new_tokens,
+                    )
+                    loss = (pg_loss + beta_kl * kl_loss) / n_accum
+
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        had_nan = True
+                        break
+
+                    if ddp:
+                        model.require_backward_grad_sync = micro_step == n_accum - 1
+                    loss.backward()
+                    loss_accum += loss.detach()
+                    pg_loss_accum += pg_loss.item()
+                    kl_loss_accum += kl_loss.item()
+                    clip_frac_accum += clip_frac
+
+                if had_nan:
+                    if ctx.master_process:
+                        print(f"step {global_step}: NaN/Inf in inner step, skipping")
                     optimizer.zero_grad()
                     continue
 
-                clip_fracs.append(clip_frac)
-
-                loss.backward()
                 norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
                 lr = get_lr(global_step, max_lr, min_lr, warmup_steps, max_steps)
-                for pg in optimizer.param_groups:
-                    pg["lr"] = lr
+                for param_group in optimizer.param_groups:
+                    param_group["lr"] = lr
                 optimizer.step()
 
-                losses.append(loss.item())
-                pg_losses.append(pg_loss.item())
-                kl_losses.append(kl_loss.item())
+                losses.append(loss_accum.item())
+                pg_losses.append(pg_loss_accum / n_accum)
+                kl_losses.append(kl_loss_accum / n_accum)
                 norms.append(float(norm))
+                clip_fracs.append(clip_frac_accum / n_accum)
 
             t1 = time.time()
             n = max(len(losses), 1)
@@ -344,7 +382,7 @@ if __name__ == "__main__":
             avg_kl = sum(kl_losses) / n
             avg_norm = sum(norms) / n
             avg_clip = sum(clip_fracs) / max(len(clip_fracs), 1)
-            avg_reward = rewards.mean().item()
+            avg_reward = torch.cat([r for *_, r in rollouts]).mean().item()
 
             if ddp:
                 t = torch.tensor(avg_reward, device=ctx.device)
@@ -379,8 +417,6 @@ if __name__ == "__main__":
                     )
 
             global_step += 1
-        if global_step >= max_steps:
-            break
 
     if ddp:
         dist.destroy_process_group()
