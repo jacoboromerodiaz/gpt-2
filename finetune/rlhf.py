@@ -195,7 +195,9 @@ if __name__ == "__main__":
         .eval()
     )
 
-    ref_model, _ = load_checkpoint(checkpoint_file, ctx.device, weights_only=False)
+    ref_model, _ = load_checkpoint(
+        checkpoint_file, torch.device("cpu"), weights_only=False
+    )
     ref_model.eval()
     for p in ref_model.parameters():
         p.requires_grad_(False)
@@ -259,9 +261,12 @@ if __name__ == "__main__":
                 log_probs_old = compute_sequence_log_probs(
                     model, sequence_ids, action_mask, ctx.device_type
                 )
+                ref_model.to(ctx.device)
                 log_probs_ref = compute_sequence_log_probs(
                     ref_model, sequence_ids, action_mask, ctx.device_type
                 )
+                ref_model.to("cpu")
+                torch.cuda.empty_cache()
 
                 rewards = compute_rewards(
                     sequence_ids, T_p, enc_extended, rm_model, rm_tokenizer
