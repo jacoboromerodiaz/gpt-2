@@ -7,15 +7,14 @@ repos:
         language: system
         types: [python]
 
-      - id: flake8
-        name: flake8 linter
-        entry: flake8
+      - id: ruff
+        name: ruff
+        entry: ruff check --fix
         language: system
         types: [python]
 
-      - id: pylint
-        name: pylint linter
-        entry: pylint
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format
         language: system
         types: [python]
-        args: ["--rcfile=/Users/jacoboromerodiaz/Projects/gpt-2/.pylintrc"]
