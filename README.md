@@ -120,12 +120,12 @@ Supervised finetuning on another container of [Vast.ai](https://vast.ai) for **~
 | Storage | 24 GB (Datasets + checkpoints) |
 | Pricing | ~$0.217/h on-demand |
 | Total cost | ~$1.74 |
+
 ---
 
 ### Option A — Docker template (recommended)
 
 Select the **Docker** template on Vast.ai and point it to this repo's image. The container clones the repo, installs dependencies via `uv`, and downloads the pretrained checkpoint from Google Drive automatically.
----
 
 ### Option B — PyTorch template
 
