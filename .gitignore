@@ -6,4 +6,4 @@ gpt2/log/*.pt
 gpt2/__pycache__
 finetune/__pycache__/
 finetune/log/*.pt
-__pycache__
+__pycache__/
