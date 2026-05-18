@@ -17,8 +17,19 @@ The goal was to understand every layer of the stack by building it, not importin
 
 ## Pipeline
 
-```
- BPE Tokenizer → FineWeb-Edu 10B → Pretrained Base → SFT (Alpaca) → [RLHF in progress] → Instruct Model
+```mermaid
+flowchart LR
+    A(["FineWeb-Edu 10B"]) --> B["BPE Tokenizer"]
+    B --> C["Pretrained Base"]
+
+    C --> D["SFT"]
+    F(["Databricks Dolly"]) --> D
+    E(["AlpacaDataset"]) --> D
+
+    D --> G["RLHF"]
+    E --> G
+
+    G --> I["Instruct Model"]
 ```
 
 ---
@@ -43,29 +54,41 @@ Architecture and data pipeline follow Karpathy's nanoGPT, trained on FineWeb-Edu
 
 ---
 
-## Tokenizer
+## Finetuning
 
-Byte Pair Encoding implemented from scratch on the [`tokenizer`](https://github.com/jacoboromerodiaz/gpt-2/tree/tokenizer) branch, no libraries. Replicates the exact algorithm used in GPT-2: iterative pair merging over a UTF-8 byte vocabulary. Built to understand the internals, not to replace tiktoken.
+Extends the pretrained base into an instruction-following assistant through two post-training stages, following the [InstructGPT](https://arxiv.org/abs/2203.02155) paradigm (Ouyang et al., 2022).
+
+This implements Steps 1 and 3 of the InstructGPT pipeline. Step 2 (reward model training) is skipped by using OpenAssistant's pretrained DeBERTa-v3 reward model instead:
+
+<div align="center">
+  <img src="assets/instruct_gpt.png" width="640px"/>
+</div>
+
+Implementation details for both stages: [finetune/README.md](finetune/README.md)
+
+### Stage 1 — Supervised Finetuning
+
+Fine-tuned on [`AlpacaDataset`](https://huggingface.co/datasets/yahma/alpaca-cleaned) and [`Databricks Dolly 15K`](https://huggingface.co/datasets/databricks/databricks-dolly-15k) to shift the model from next-token prediction on raw text to following the **assistant format**. Only assistant response tokens contribute to the loss, user prompts are masked with `-100` to prevent the model from memorizing queries.
+
+### Stage 2 — RLHF via GRPO
+
+Uses [Group Relative Policy Optimization](https://arxiv.org/abs/2402.03300) (DeepSeekMath, 2024) rather than vanilla PPO. The value network is dropped, advantages are computed from group-relative reward scores across `G=16` completions per prompt. A KL penalty against the frozen SFT reference prevents the policy from drifting too far.
 
 ---
 
-## Fine-Tuning
+## Tokenizer
 
-Inspired by Karpathy's [Deep Dive into LLMs like ChatGPT](https://www.youtube.com/watch?v=7xTGNNLPyMI&t=10811s). The pretrained base is extended into an instruct model through two post-training stages.
-
-### Stage 1 — Supervised Fine-Tuning
-
-Fine-tuned on the Alpaca instruction dataset to shift the model from a next-token predictor to one that follows the assistant format. This is the part of the pipeline I implemented independently of the tutorial — dataset formatting, training loop modifications, and prompt templating.
-
-### Stage 2 — RLHF (in progress)
-
-Training a reward model on human preference data, then using PPO to optimize the SFT model against that signal. The goal is to close the gap between "responds in assistant format" and "responds helpfully."
+Byte Pair Encoding implemented from scratch on the [`tokenizer`](https://github.com/jacoboromerodiaz/gpt-2/tree/tokenizer) branch, no libraries. Replicates the exact algorithm used in GPT-2: iterative pair merging over a UTF-8 byte vocabulary.
 
 ---
 
 ## Infrastructure
 
-Full pretraining on [Vast.ai](https://vast.ai) for ~$7.50 (~37 h of training).
+Used [Vast.ai](https://vast.ai) for all trainings.
+
+#### Pretraining
+
+Full pretraining for **~$7.50** (~37 h of training).
 
 | Resource | Config |
 |---|---|
@@ -76,32 +99,32 @@ Full pretraining on [Vast.ai](https://vast.ai) for ~$7.50 (~37 h of training).
 
 Use **on-demand** (not interruptible) to avoid losing a mid-epoch checkpoint.
 
+#### SFT
+
+Supervised finetuning on another container of [Vast.ai](https://vast.ai) for **~$0.22** (<1 h of finetuning).
+
+| Resource | Config |
+|---|---|
+| GPU | 1× 8 GB VRAM (pretrained checkpoint) |
+| Storage | 16 GB (Datasets + checkpoints) |
+| Pricing | ~$0.217/h on-demand |
+| Total cost | ~$0.217 |
+
+#### RLHF
+
+Supervised finetuning on another container of [Vast.ai](https://vast.ai) for **~$2** (8 h of reinforcement learning).
+
+| Resource | Config |
+|---|---|
+| GPU | 1× 24 GB VRAM (sft checkpoint + ref model + reward model) |
+| Storage | 24 GB (Datasets + checkpoints) |
+| Pricing | ~$0.217/h on-demand |
+| Total cost | ~$1.74 |
 ---
 
 ### Option A — Docker template (recommended)
 
 Select the **Docker** template on Vast.ai and point it to this repo's image. The container clones the repo, installs dependencies via `uv`, and downloads the pretrained checkpoint from Google Drive automatically.
-
-```dockerfile
-FROM python:3.11
-
-RUN apt-get update && apt-get install -y curl git
-
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/
-
-RUN git clone https://github.com/jacoboromerodiaz/gpt-2.git /workspace/gpt-2
-
-WORKDIR /workspace/gpt-2
-
-ENV PATH="/workspace/gpt-2/.venv/bin:$PATH"
-
-RUN uv sync
-
-RUN uv pip install gdown
-
-RUN gdown --id [YOUR_DRIVE_FILE_ID] -O /workspace/gpt-2/finetune/log/model.pt
-```
-
 ---
 
 ### Option B — PyTorch template
@@ -114,11 +137,14 @@ cd gpt-2
 
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
+source .venv/bin/activate
 
 # download the pretrained checkpoint from drive
 uv pip install gdown
-gdown [YOUR_DRIVE_FILE_ID] -O finetune/log/model.pt
+gdown [GOOGLE_DRIVE_ID] -O "/workspace/gpt-2/gpt2/log/model.pt"
 ```
+
+> Model checkpoints can be provided upon request.
 
 ---
 
@@ -135,5 +161,3 @@ Then update the data path in `data.py` to point to your local shard directory an
 ```bash
 python train.py
 ```
-
-> **Note:** path configuration will be moved to a `config.yaml` file in a future update.
