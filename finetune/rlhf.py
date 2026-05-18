@@ -18,11 +18,6 @@ from finetune.data import AlpacaPromptDataset, collate_prompts, IM_END, EOS
 
 RM_NAME = "OpenAssistant/reward-model-deberta-v3-base"
 
-# Notes
-# - rm model imported, tokenizer trick
-# - kl divergence uses k3
-# - reward hacking outputing user prompt
-
 
 def build_action_mask(sequence_ids, prompt_len, stop_tokens=(IM_END, EOS)):
     """
@@ -154,7 +149,7 @@ if __name__ == "__main__":
     ctx = setup_device()
     ddp = ctx.ddp
 
-    max_lr = 2e-6
+    max_lr = 3e-6
     min_lr = 2e-7
     warmup_steps = 300
     weight_decay = 0.1
@@ -169,7 +164,7 @@ if __name__ == "__main__":
     sim_batch_size = 64
     assert sim_batch_size % (batch_size * group_size) == 0
     grad_accum_steps = sim_batch_size // (batch_size * group_size)
-    epochs = 3
+    epochs = 1
     fixed_len_norm = True  # divide by L_max instead of per-sequence length
 
     checkpoint_file = os.environ.get(
@@ -243,7 +238,6 @@ if __name__ == "__main__":
         while global_step < max_steps:
             t0 = time.time()
 
-            # --- rollout phase: collect grad_accum_steps independent micro-batches ---
             rollouts = []
             for _ in range(grad_accum_steps):
                 try:
@@ -309,7 +303,6 @@ if __name__ == "__main__":
                     "\n[SAMPLE]", f"reward={rews[0].item():.4f}", f"\n{sample_text}\n"
                 )
 
-            # --- inner PPO updates reusing stored rollouts ---
             losses, pg_losses, kl_losses, norms, clip_fracs = [], [], [], [], []
             for _ in range(inner_update_steps):
                 loss_accum = pg_loss_accum = kl_loss_accum = clip_frac_accum = 0.0
