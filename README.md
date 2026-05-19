@@ -3,13 +3,13 @@
 
 # ChatGPT-2 (124M): from Pretraining to Instruct
 
-A full LLM pipeline built from scratch: raw text → pretrained base → SFT → instruct model.
+A full LLM pipeline built from scratch: raw text → pretrained base → SFT → RLHF → instruct model.
 
 ![Python](https://img.shields.io/badge/python-3.11-blue?logo=python&logoColor=white) ![License](https://img.shields.io/badge/license-MIT-green) ![Status](https://img.shields.io/badge/status-in%20progress-orange)
 
 </div>
 
-This follows [Karpathy's](https://www.youtube.com/@AndrejKarpathy) nanoGPT/GPT-tokenizer series as a foundation, then extends it into a complete post-training pipeline: tokenizer, supervised fine-tuning on instruction data, and an in-progress RLHF stage with a learned reward model.
+This follows [Karpathy's](https://www.youtube.com/@AndrejKarpathy) nanoGPT/GPT-tokenizer series as a foundation, then extends it into a complete post-training pipeline: tokenizer, supervised fine-tuning on instruction data, and an RLHF stage with a reward model.
 
 The goal was to understand every layer of the stack by building it, not importing it.
 
@@ -66,13 +66,23 @@ This implements Steps 1 and 3 of the InstructGPT pipeline. Step 2 (reward model 
 
 Implementation details for both stages: [finetune/README.md](finetune/README.md)
 
-### Stage 1 — Supervised Finetuning
+### Stage 1: Supervised Finetuning
 
 Fine-tuned on [`AlpacaDataset`](https://huggingface.co/datasets/yahma/alpaca-cleaned) and [`Databricks Dolly 15K`](https://huggingface.co/datasets/databricks/databricks-dolly-15k) to shift the model from next-token prediction on raw text to following the **assistant format**. Only assistant response tokens contribute to the loss, user prompts are masked with `-100` to prevent the model from memorizing queries.
 
-### Stage 2 — RLHF via GRPO
+### Stage 2: Reinforcement Learning from Human Feedback
 
 Uses [Group Relative Policy Optimization](https://arxiv.org/abs/2402.03300) (DeepSeekMath, 2024) rather than vanilla PPO. The value network is dropped, advantages are computed from group-relative reward scores across `G=16` completions per prompt. A KL penalty against the frozen SFT reference prevents the policy from drifting too far.
+
+**Results**
+
+| Model | HellaSwag |
+|---|---:|
+| Pretrained | 0.3066 |
+| SFT | 0.3080 |
+| RLHF | **0.3174** |
+
+Outputs and examples can be explored in [`finetune/playground.ipynb`](finetune/playground.ipynb).
 
 ---
 
@@ -125,7 +135,9 @@ Supervised finetuning on another container of [Vast.ai](https://vast.ai) for **~
 
 ### Option A — Docker template (recommended)
 
-Select the **Docker** template on Vast.ai and point it to this repo's image. The container clones the repo, installs dependencies via `uv`, and downloads the pretrained checkpoint from Google Drive automatically.
+Select the **Docker** template on Vast.ai and point it to this repo's image: `jacoboromerodiaz/gpt-2:latest`. The container clones the repo, installs dependencies via `uv`, and downloads the pretrained checkpoint from Google Drive automatically.
+
+Ready to pretrain/finetune/reinforce.
 
 ### Option B — PyTorch template
 
@@ -139,25 +151,15 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 source .venv/bin/activate
 
-# download the pretrained checkpoint from drive
 uv pip install gdown
-gdown [GOOGLE_DRIVE_ID] -O "/workspace/gpt-2/gpt2/log/model.pt"
+gdown [PRETRAINED_CKPT_GOOGLE_DRIVE_ID] -O "/workspace/gpt-2/gpt2/log/model.pt"
+gdown [SFT_CKPT_GOOGLE_DRIVE_ID] -O "/workspace/gpt-2/finetune/log/sft_model.pt"
 ```
 
-> Model checkpoints can be provided upon request.
-
----
-
-### Running pretraining from scratch
-
-The setup above pulls the pretrained checkpoint and is ready for fine-tuning. To reproduce pretraining from scratch, upload the FineWeb-Edu dataset shards to Google Drive and download them into the container the same way:
+> Replace `[GOOGLE_DRIVE_ID]` with your pretrained checkpoints. Model checkpoints can be provided upon request.
 
 ```bash
-gdown [YOUR_DATASET_DRIVE_ID] -O data/
+export SFT_CHECKPOINT="/workspace/gpt-2/gpt2/log/model.pt"
+export GRPO_CHECKPOINT="/workspace/gpt-2/gpt2/log/sft_model.pt"
 ```
-
-Then update the data path in `data.py` to point to your local shard directory and run:
-
-```bash
-python train.py
-```
+Then you are ready to pretrain/finetune/reinforce!
