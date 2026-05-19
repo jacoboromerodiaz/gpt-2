@@ -169,7 +169,7 @@ if __name__ == "__main__":
 
     checkpoint_file = os.environ.get(
         "GRPO_CHECKPOINT",
-        "/Users/jacoboromerodiaz/Projects/gpt-2/finetune/log/ft_model_29099.pt",
+        "/workspace/gpt-2/finetune/log/sft_model_05615.pt",
     )
 
     model, _ = load_checkpoint(checkpoint_file, ctx.device, weights_only=False)

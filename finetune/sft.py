@@ -48,7 +48,10 @@ if __name__ == "__main__":
 
     epochs = 3
 
-    checkpoint_file = "/workspace/gpt-2/finetune/log/model.pt"
+    checkpoint_file = os.environ.get(
+        "SFT_CHECKPOINT",
+        "/workspace/gpt-2/finetune/log/model.pt",
+    )
 
     model, checkpoint = load_checkpoint(checkpoint_file, device, weights_only=False)
     optimizer = model.configure_optimizer(
@@ -88,7 +91,7 @@ if __name__ == "__main__":
 
     # reuse train logic from train.py
     max_steps = len(train_dataset) // (batch_size * grad_accum_steps) * epochs
-    eval_every = max_steps // 3
+    eval_every = 500
     for step in range(max_steps):
         t0 = time.time()
         last_step = step == max_steps - 1
@@ -115,7 +118,7 @@ if __name__ == "__main__":
                 print(f"validation loss: {val_loss_accum.item():.4f}")
                 with open(log_file, "a", encoding="utf-8") as f:
                     f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-                if step % eval_every == 0 or last_step:
+                if last_step:
                     checkpoint_path = os.path.join(log_dir, f"sft_model_{step:05d}.pt")
                     checkpoint = {
                         "model": raw_model.state_dict(),
@@ -159,7 +162,7 @@ if __name__ == "__main__":
         if master_process:
             print(
                 f"step {step:5d} | loss: {loss_accum.item():.6f} |"
-                f", lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms",
+                f", lr {lr:.4e} | norm: {norm:.4f} | dt: {dt * 1000:.2f}ms",
             )
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"{step} train {loss_accum.item():.6f}\n")
